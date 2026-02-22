@@ -77,16 +77,17 @@ EOF
 setup_networking() {
     log "Configuring networking for exit node functionality..."
     
-    # Enable IP forwarding (immediate)
-    echo 1 > /proc/sys/net/ipv4/ip_forward
-    echo 1 > /proc/sys/net/ipv6/conf/all/forwarding
+    # Enable IP forwarding (immediate) - ignore errors as these may be read-only
+    # These should already be set via docker-compose sysctls
+    echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || log "Note: /proc/sys/net/ipv4/ip_forward is read-only (set via docker sysctls)"
+    echo 1 > /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null || log "Note: IPv6 forwarding sysctl is read-only"
     
     # Enable source route validation
-    echo 1 > /proc/sys/net/ipv4/conf/all/src_valid_mark
+    echo 1 > /proc/sys/net/ipv4/conf/all/src_valid_mark 2>/dev/null || log "Note: src_valid_mark sysctl is read-only"
     
     # Disable ICMP redirects
-    echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects
-    echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects
+    echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects 2>/dev/null || true
+    echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects 2>/dev/null || true
     
     # Configure sysctl.conf for persistence across reboots
     cat >> /etc/sysctl.conf << 'EOF'
