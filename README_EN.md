@@ -87,8 +87,8 @@ cd proton-over-tailscale-proxy
 
 2. Configure environment variables:
 ```bash
-cp config/.env.example config/.env
-# Edit config/.env with your credentials
+cp .env.example .env
+# Edit .env with your credentials
 ```
 
 3. Run with Docker:

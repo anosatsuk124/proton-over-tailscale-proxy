@@ -87,8 +87,8 @@ cd proton-over-tailscale-proxy
 
 2. 環境変数の設定:
 ```bash
-cp config/.env.example config/.env
-# config/.envを編集して認証情報を設定
+cp .env.example .env
+# .envを編集して認証情報を設定
 ```
 
 3. Dockerで実行:
