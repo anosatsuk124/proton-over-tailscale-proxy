@@ -1,6 +1,6 @@
 # API Documentation
 
-This document describes the REST API endpoints available in the ProtonVPN over Tailscale Proxy system.
+This document describes the REST API endpoints available in the ProtonVPN Tailscale Exit Node system.
 
 ## Base URL
 
@@ -86,6 +86,88 @@ Retrieve the current connection status of VPN and Tailscale containers.
 **Example:**
 ```bash
 curl http://localhost:8080/status
+```
+
+---
+
+### Get Exit Node Status
+
+Retrieve the current exit node status and configuration.
+
+**Endpoint:** `GET /exit-node`
+
+**Response:**
+```json
+{
+  "enabled": true,
+  "advertised": true,
+  "approved": true,
+  "hostname": "proton-vpn-exit",
+  "tailscale_ip": "100.x.y.z",
+  "connected_clients": 3,
+  "last_updated": "2024-01-15T10:30:00Z"
+}
+```
+
+**Fields:**
+- `enabled`: Whether exit node functionality is enabled
+- `advertised`: Whether the node is advertising as an exit node
+- `approved`: Whether approved in Tailscale admin console
+- `hostname`: The hostname in Tailscale network
+- `tailscale_ip`: The Tailscale IP address
+- `connected_clients`: Number of clients using this exit node
+- `last_updated`: Last status update timestamp
+
+**Example:**
+```bash
+curl http://localhost:8080/exit-node
+```
+
+---
+
+### Update Exit Node
+
+Enable or disable the exit node functionality.
+
+**Endpoint:** `POST /exit-node`
+
+**Request Body:**
+```json
+{
+  "enabled": true
+}
+```
+
+**Parameters:**
+- `enabled` (required): Boolean to enable or disable exit node
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Exit node enabled successfully",
+  "data": {
+    "enabled": true,
+    "advertised": true
+  }
+}
+```
+
+**Error Codes:**
+- `400 Bad Request`: Invalid request body
+- `500 Internal Server Error`: Failed to update exit node configuration
+
+**Example:**
+```bash
+# Enable exit node
+curl -X POST http://localhost:8080/exit-node \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+
+# Disable exit node
+curl -X POST http://localhost:8080/exit-node \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
 ```
 
 ---
@@ -244,6 +326,10 @@ Retrieve the current system configuration.
   "frontend_port": 3000,
   "default_server": "US-FREE#1",
   "log_level": "info",
+  "tailscale": {
+    "hostname": "proton-vpn-exit",
+    "advertise_exit_node": true
+  },
   "features": {
     "auto_reconnect": true,
     "kill_switch": true
@@ -271,6 +357,10 @@ Update system configuration (requires authentication).
 {
   "default_server": "JP-FREE#1",
   "log_level": "debug",
+  "tailscale": {
+    "hostname": "new-hostname",
+    "advertise_exit_node": true
+  },
   "features": {
     "auto_reconnect": true,
     "kill_switch": false
@@ -298,7 +388,10 @@ curl -X POST http://localhost:8080/config \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -d '{
     "default_server": "NL-FREE#1",
-    "log_level": "info"
+    "log_level": "info",
+    "tailscale": {
+      "advertise_exit_node": true
+    }
   }'
 ```
 
@@ -329,6 +422,7 @@ curl -X POST http://localhost:8080/config \
 | `DOCKER_ERROR` | Docker daemon error |
 | `CONFIG_ERROR` | Configuration error |
 | `VPN_ERROR` | VPN connection error |
+| `EXIT_NODE_ERROR` | Exit node configuration error |
 | `AUTH_ERROR` | Authentication error |
 | `VALIDATION_ERROR` | Request validation error |
 | `NOT_FOUND` | Resource not found |
@@ -341,6 +435,7 @@ API endpoints are rate-limited to prevent abuse:
 - **Health Check**: No limit
 - **Status/Logs**: 100 requests per minute
 - **Connect/Disconnect**: 10 requests per minute
+- **Exit Node Operations**: 10 requests per minute
 - **Configuration**: 30 requests per minute
 
 Rate limit headers are included in responses:
@@ -385,26 +480,64 @@ import requests
 
 BASE_URL = "http://localhost:8080"
 
-def get_status():
-    response = requests.get(f"{BASE_URL}/status")
-    return response.json()
+class ProtonVPNExitNodeClient:
+    def __init__(self, base_url: str = BASE_URL):
+        self.base_url = base_url
+    
+    def get_status(self):
+        response = requests.get(f"{self.base_url}/status")
+        return response.json()
+    
+    def get_exit_node_status(self):
+        response = requests.get(f"{self.base_url}/exit-node")
+        return response.json()
+    
+    def enable_exit_node(self):
+        response = requests.post(
+            f"{self.base_url}/exit-node",
+            json={"enabled": True}
+        )
+        return response.json()
+    
+    def disable_exit_node(self):
+        response = requests.post(
+            f"{self.base_url}/exit-node",
+            json={"enabled": False}
+        )
+        return response.json()
+    
+    def connect(self, server="US-FREE#1"):
+        response = requests.post(
+            f"{self.base_url}/connect",
+            json={"server": server, "protocol": "wireguard"}
+        )
+        return response.json()
+    
+    def disconnect(self):
+        response = requests.post(f"{self.base_url}/disconnect")
+        return response.json()
 
-def connect(server="US-FREE#1"):
-    response = requests.post(
-        f"{BASE_URL}/connect",
-        json={"server": server, "protocol": "wireguard"}
-    )
-    return response.json()
+# Usage
+client = ProtonVPNExitNodeClient()
 
-def disconnect():
-    response = requests.post(f"{BASE_URL}/disconnect")
-    return response.json()
+# Check current status
+status = client.get_status()
+print(f"VPN Connected: {status['connected']}")
+
+# Check exit node status
+exit_node = client.get_exit_node_status()
+print(f"Exit Node Enabled: {exit_node['enabled']}")
+print(f"Connected Clients: {exit_node['connected_clients']}")
+
+# Enable exit node
+result = client.enable_exit_node()
+print(result['message'])
 ```
 
 ### JavaScript/TypeScript
 
 ```typescript
-class ProtonVPNClient {
+class ProtonVPNExitNodeClient {
   private baseUrl: string;
   
   constructor(baseUrl: string = 'http://localhost:8080') {
@@ -413,6 +546,20 @@ class ProtonVPNClient {
   
   async getStatus() {
     const response = await fetch(`${this.baseUrl}/status`);
+    return response.json();
+  }
+  
+  async getExitNodeStatus() {
+    const response = await fetch(`${this.baseUrl}/exit-node`);
+    return response.json();
+  }
+  
+  async setExitNode(enabled: boolean) {
+    const response = await fetch(`${this.baseUrl}/exit-node`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
     return response.json();
   }
   
@@ -438,6 +585,21 @@ class ProtonVPNClient {
     return ws;
   }
 }
+
+// Usage
+const client = new ProtonVPNExitNodeClient();
+
+// Enable exit node and connect
+async function setupExitNode() {
+  await client.connect('NL-FREE#1');
+  await client.setExitNode(true);
+  
+  const status = await client.getExitNodeStatus();
+  console.log(`Exit node enabled: ${status.enabled}`);
+  console.log(`Connected clients: ${status.connected_clients}`);
+}
+
+setupExitNode();
 ```
 
 ### Go
@@ -464,6 +626,43 @@ func NewClient(baseURL string) *Client {
     }
 }
 
+func (c *Client) GetExitNodeStatus() (map[string]interface{}, error) {
+    resp, err := c.client.Get(c.baseURL + "/exit-node")
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+    
+    var result map[string]interface{}
+    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+        return nil, err
+    }
+    
+    return result, nil
+}
+
+func (c *Client) SetExitNode(enabled bool) error {
+    payload := map[string]bool{"enabled": enabled}
+    
+    body, _ := json.Marshal(payload)
+    resp, err := c.client.Post(
+        c.baseURL+"/exit-node",
+        "application/json",
+        bytes.NewBuffer(body),
+    )
+    
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+    
+    if resp.StatusCode != http.StatusOK {
+        return fmt.Errorf("failed to update exit node: %d", resp.StatusCode)
+    }
+    
+    return nil
+}
+
 func (c *Client) Connect(server string) error {
     payload := map[string]string{
         "server":   server,
@@ -488,4 +687,62 @@ func (c *Client) Connect(server string) error {
     
     return nil
 }
+
+// Usage
+func main() {
+    client := NewClient("http://localhost:8080")
+    
+    // Connect and enable exit node
+    if err := client.Connect("US-FREE#1"); err != nil {
+        fmt.Printf("Error connecting: %v\n", err)
+        return
+    }
+    
+    if err := client.SetExitNode(true); err != nil {
+        fmt.Printf("Error enabling exit node: %v\n", err)
+        return
+    }
+    
+    status, err := client.GetExitNodeStatus()
+    if err != nil {
+        fmt.Printf("Error getting status: %v\n", err)
+        return
+    }
+    
+    fmt.Printf("Exit node enabled: %v\n", status["enabled"])
+    fmt.Printf("Connected clients: %v\n", status["connected_clients"])
+}
+```
+
+## Exit Node Workflow
+
+### Complete Setup Flow
+
+```bash
+# 1. Check initial status
+curl http://localhost:8080/status
+
+# 2. Connect to VPN
+curl -X POST http://localhost:8080/connect \
+  -H "Content-Type: application/json" \
+  -d '{"server": "US-FREE#1"}'
+
+# 3. Verify VPN is connected
+curl http://localhost:8080/status
+
+# 4. Check exit node status
+curl http://localhost:8080/exit-node
+
+# 5. Enable exit node (if not already enabled)
+curl -X POST http://localhost:8080/exit-node \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+
+# 6. Approve in Tailscale Admin Console
+# Visit: https://login.tailscale.com/admin/machines
+# Find your node and enable "Use as exit node"
+
+# 7. Verify clients can connect
+curl http://localhost:8080/exit-node
+# Should show "approved": true and connected_clients > 0
 ```

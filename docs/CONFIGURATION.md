@@ -1,6 +1,6 @@
 # Configuration Guide
 
-This document covers all configuration options for the ProtonVPN over Tailscale Proxy system.
+This document covers all configuration options for the ProtonVPN Tailscale Exit Node system.
 
 ## Configuration Files
 
@@ -17,6 +17,8 @@ PROTONVPN_PASSWORD=your_protonvpn_password
 TAILSCALE_AUTH_KEY=tskey-auth-your-key-here
 
 # Optional Settings
+TAILSCALE_HOSTNAME=proton-vpn-exit
+TAILSCALE_ADVERTISE_EXIT_NODE=true
 API_PORT=8080
 FRONTEND_PORT=3000
 LOG_LEVEL=info
@@ -46,6 +48,10 @@ services:
   frontend:
     environment:
       - VITE_API_URL=http://localhost:8080
+  
+  vpn:
+    environment:
+      - TAILSCALE_HOSTNAME=dev-exit-node
 ```
 
 ## Environment Variables Reference
@@ -58,6 +64,16 @@ services:
 | `PROTONVPN_PASSWORD` | Your ProtonVPN account password | `your_secure_password` |
 | `TAILSCALE_AUTH_KEY` | Tailscale authentication key | `tskey-auth-k123456CNTRL-...` |
 
+### Tailscale Exit Node Settings
+
+| Variable | Description | Default | Notes |
+|----------|-------------|---------|-------|
+| `TAILSCALE_HOSTNAME` | Hostname in Tailscale network | `proton-vpn-exit` | Must be unique in your network |
+| `TAILSCALE_ADVERTISE_EXIT_NODE` | Advertise as exit node | `true` | Required for exit node functionality |
+| `TAILSCALE_ACCEPT_DNS` | Use Tailscale DNS | `true` | Allows DNS via Tailscale |
+| `TAILSCALE_ACCEPT_ROUTES` | Accept routes from other nodes | `true` | For subnet routing |
+| `TAILSCALE_ADVERTISE_ROUTES` | Additional routes to advertise | - | Comma-separated CIDRs |
+
 ### VPN Settings
 
 | Variable | Description | Default | Options |
@@ -66,16 +82,6 @@ services:
 | `VPN_PROTOCOL` | VPN protocol to use | `wireguard` | `wireguard`, `openvpn` |
 | `VPN_TIER` | ProtonVPN plan tier | `free` | `free`, `plus`, `visionary` |
 | `VPN_DNS` | Custom DNS servers | `1.1.1.1,8.8.8.8` | Comma-separated IPs |
-
-### Tailscale Settings
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `TAILSCALE_HOSTNAME` | Hostname in Tailscale network | `proton-vpn-exit` |
-| `TAILSCALE_ADVERTISE_EXIT_NODE` | Advertise as exit node | `true` |
-| `TAILSCALE_ADVERTISE_ROUTES` | Additional routes to advertise | `10.0.0.0/8` |
-| `TAILSCALE_ACCEPT_DNS` | Use Tailscale DNS | `true` |
-| `TAILSCALE_ACCEPT_ROUTES` | Accept routes from other nodes | `true` |
 
 ### API Server Settings
 
@@ -117,6 +123,91 @@ services:
 | `DOCKER_DNS` | DNS servers for containers | `1.1.1.1,8.8.8.8` |
 | `DOCKER_RESTART_POLICY` | Container restart policy | `unless-stopped` |
 
+## Tailscale Exit Node Configuration
+
+### Auth Key Types
+
+**Reusable Key (Recommended for servers):**
+```bash
+TAILSCALE_AUTH_KEY=tskey-auth-k123456CNTRL-abc123def456
+```
+
+Generate at: https://login.tailscale.com/admin/settings/keys
+
+**Key Options for Exit Nodes:**
+- Ephemeral: `false` (persist node identity across restarts)
+- Reusable: `true` (can use same key for multiple deployments)
+- Pre-authorized: `true` (skip initial approval step)
+- Tags: `tag:exit-node` (for ACL management)
+
+### Exit Node Approval Process
+
+After deploying the container, you **must** approve the exit node in Tailscale Admin Console:
+
+1. **Navigate to Admin Console**
+   ```
+   https://login.tailscale.com/admin/machines
+   ```
+
+2. **Find Your Node**
+   - Look for the hostname you configured (`TAILSCALE_HOSTNAME`)
+   - It will show as "connected" but not yet approved as exit node
+
+3. **Enable Exit Node**
+   - Click the "..." menu next to your node
+   - Select "Edit route settings..."
+   - Enable "Use as exit node"
+   - Click "Save"
+
+4. **Verify Approval**
+   ```bash
+   # Check exit node status via API
+   curl http://localhost:8080/exit-node
+   
+   # Or check via tailscale CLI in container
+   docker exec proton-vpn tailscale status
+   ```
+
+### Client Configuration
+
+Once approved, clients can use the exit node:
+
+**Command Line (Linux/macOS):**
+```bash
+# Connect using exit node
+tailscale up --exit-node=proton-vpn-exit
+
+# Verify connection
+tailscale status
+
+# Stop using exit node
+tailscale up --exit-node=
+```
+
+**Windows:**
+```powershell
+# Using PowerShell
+tailscale up --exit-node=proton-vpn-exit
+
+# Or use Tailscale GUI:
+# System tray → Tailscale → Exit Node → Select your node
+```
+
+**iOS/Android:**
+1. Open Tailscale app
+2. Tap "Exit Node" at bottom
+3. Select your exit node from the list
+
+**Verify Exit Node is Working:**
+```bash
+# Check your public IP (should show ProtonVPN server location)
+curl https://ipinfo.io
+
+# Check Tailscale connection
+tailscale status
+# Should show: "; proton-vpn-exit offers exit node"
+```
+
 ## ProtonVPN Server Configuration
 
 ### Server Selection
@@ -155,56 +246,36 @@ VPN_SERVER=SECURE_CORE  # Any Secure Core server
 - Tor servers: `US-TX#1`, `CH-SE#1`
 - Secure Core: `US-SECURE-CORE`, `CH-SECURE-CORE`
 
-## Tailscale Configuration
-
-### Auth Key Types
-
-**Reusable Key (Recommended for servers):**
-```bash
-TAILSCALE_AUTH_KEY=tskey-auth-k123456CNTRL-abc123def456
-```
-
-Generate at: https://login.tailscale.com/admin/settings/keys
-
-**Options:**
-- Ephemeral: `false` (persist node identity)
-- Reusable: `true` (can be used multiple times)
-- Pre-authorized: `true` (skip approval)
-- Tags: `tag:exit-node`
-
-### Exit Node Configuration
-
-To use this server as a Tailscale exit node:
-
-1. **Enable in container:**
-```bash
-TAILSCALE_ADVERTISE_EXIT_NODE=true
-```
-
-2. **Approve in Tailscale Admin Console:**
-   - Go to https://login.tailscale.com/admin/machines
-   - Find your node
-   - Click "Edit route settings"
-   - Enable "Use as exit node"
-
-3. **Connect from client:**
-```bash
-# Linux/macOS
-tailscale up --exit-node=proton-vpn-exit
-
-# Windows
-tailscale up --exit-node=proton-vpn-exit
-```
-
-### Subnet Router
-
-To route specific subnets through this node:
-
-```bash
-TAILSCALE_ADVERTISE_ROUTES=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
-```
-
 ## Advanced Configuration
+
+### Userspace Networking
+
+Tailscale runs in userspace mode by default for compatibility:
+
+```bash
+# This is set automatically in the container
+TAILSCALE_FLAGS=--tun=userspace-networking --socks5-server=localhost:1055
+```
+
+**Benefits:**
+- No TUN device conflicts with WireGuard
+- Works in Docker without privileged mode for Tailscale
+- Simpler networking setup
+
+### NAT/Masquerading Configuration
+
+The exit node automatically configures iptables for NAT:
+
+```bash
+# These are configured automatically in the container
+# Enable IP forwarding
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
+# NAT configuration
+iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
+iptables -A FORWARD -i ts0 -o wg0 -j ACCEPT
+iptables -A FORWARD -i wg0 -o ts0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+```
 
 ### WireGuard Settings
 
@@ -227,7 +298,7 @@ WG_DNS_LEAK_PROTECTION=true
 
 ### Firewall Configuration
 
-The system uses iptables for traffic management. Default rules:
+The system uses iptables for traffic management:
 
 ```bash
 # Kill switch (block traffic if VPN disconnects)
@@ -261,10 +332,12 @@ NET_NETFILTER_NF_CONNTRACK_MAX=2000000
 ### Basic Setup
 
 ```bash
-# Minimal configuration
+# Minimal configuration for exit node
 PROTONVPN_USERNAME=user@example.com
 PROTONVPN_PASSWORD=pass123
 TAILSCALE_AUTH_KEY=tskey-auth-xxx
+TAILSCALE_HOSTNAME=my-exit-node
+TAILSCALE_ADVERTISE_EXIT_NODE=true
 ```
 
 ### Production Setup
@@ -280,13 +353,14 @@ VPN_PROTOCOL=wireguard
 VPN_TIER=plus
 ENABLE_KILL_SWITCH=true
 
+TAILSCALE_HOSTNAME=secure-exit-node
+TAILSCALE_ADVERTISE_EXIT_NODE=true
+TAILSCALE_ACCEPT_DNS=true
+
 API_PORT=8080
 API_RATE_LIMIT=60
 LOG_LEVEL=warn
 LOG_FORMAT=json
-
-TAILSCALE_HOSTNAME=secure-exit-node
-TAILSCALE_ADVERTISE_EXIT_NODE=true
 ```
 
 ### Development Setup
@@ -301,6 +375,7 @@ VPN_SERVER=US-FREE#1
 LOG_LEVEL=debug
 LOG_FORMAT=pretty
 
+TAILSCALE_HOSTNAME=dev-exit-node
 API_PORT=8080
 FRONTEND_PORT=3000
 ```
@@ -326,6 +401,16 @@ Error: invalid auth key
 - Generate new auth key from Tailscale console
 - Ensure key is not expired
 - Check if node limit reached
+
+**Issue:** Exit node not working
+```
+Error: Clients cannot route through exit node
+```
+**Solution:**
+1. Verify exit node is approved in Tailscale Admin Console
+2. Check `TAILSCALE_ADVERTISE_EXIT_NODE=true` is set
+3. Verify NAT/masquerading is enabled in container
+4. Check ACL rules allow exit node usage
 
 **Issue:** API returns 500 errors
 ```
@@ -354,14 +439,20 @@ source config/.env && echo "Config loaded successfully"
 # Test Docker connectivity
 docker ps
 
-# Test ProtonVPN credentials
-# (Replace with your actual check command)
+# Test exit node status
+curl http://localhost:8080/exit-node
 
-# Test Tailscale auth key
+# Check Tailscale auth key
 curl -s "https://login.tailscale.com/xxx" # API endpoint
 
 # Check network connectivity
-ping -c 4 1.1.1.1
+docker exec proton-vpn ping -c 4 1.1.1.1
+
+# Verify iptables rules
+docker exec proton-vpn iptables -t nat -L
+
+# Check Tailscale status
+docker exec proton-vpn tailscale status
 ```
 
 ### Configuration Reload
@@ -400,6 +491,12 @@ env | grep -E "PROTON|TAILSCALE|API|VPN"
 
 # Container environment
 docker exec proton-vpn env
+
+# Tailscale status
+docker exec proton-vpn tailscale status
+
+# Exit node status
+curl http://localhost:8080/exit-node | jq
 ```
 
 ## Security Best Practices
@@ -418,14 +515,21 @@ docker exec proton-vpn env
 - Use HTTPS in production
 - Limit CORS origins
 
-### 3. Access Control
+### 3. Exit Node Security
+
+- Use Tailscale ACLs to control who can use exit node
+- Tag exit nodes for easier ACL management
+- Monitor exit node usage via API
+- Regularly audit connected clients
+
+### 4. Access Control
 
 - Restrict Tailscale ACLs
 - Use tags for node management
 - Enable audit logging
 - Implement API authentication
 
-### 4. Regular Updates
+### 5. Regular Updates
 
 - Keep Docker images updated
 - Update Tailscale client regularly
@@ -433,6 +537,26 @@ docker exec proton-vpn env
 - Test updates in staging
 
 ## Migration Guide
+
+### From SOCKS Proxy to Exit Node
+
+If you're migrating from the SOCKS proxy architecture:
+
+1. **Update Environment Variables**
+   ```bash
+   # Remove proxy settings
+   # SOCKS_PORT=1080  # Remove this
+   
+   # Add exit node settings
+   TAILSCALE_ADVERTISE_EXIT_NODE=true
+   ```
+
+2. **Update Client Configuration**
+   - Remove SOCKS proxy settings from clients
+   - Configure clients to use Tailscale exit node instead
+
+3. **Approve Exit Node**
+   - Follow the approval process in Tailscale Admin Console
 
 ### From File-based to Docker Secrets
 
@@ -451,6 +575,7 @@ services:
       - tailscale_auth
     environment:
       - PROTONVPN_PASSWORD_FILE=/run/secrets/proton_password
+      - TAILSCALE_AUTH_KEY_FILE=/run/secrets/tailscale_auth
 ```
 
 ### Environment Variable Changes
