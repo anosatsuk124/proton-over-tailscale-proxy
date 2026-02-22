@@ -5,14 +5,21 @@ set -e
 # Routes all Tailscale client traffic through ProtonVPN via WireGuard
 
 # Configuration variables with defaults
+# Strip any newlines from keys to prevent config file corruption
 PROTON_WG_PRIVATE_KEY="${PROTON_WG_PRIVATE_KEY:-}"
+PROTON_WG_PRIVATE_KEY=$(echo -n "$PROTON_WG_PRIVATE_KEY" | tr -d '\n\r')
+
 PROTON_WG_PUBLIC_KEY="${PROTON_WG_PUBLIC_KEY:-}"
+PROTON_WG_PUBLIC_KEY=$(echo -n "$PROTON_WG_PUBLIC_KEY" | tr -d '\n\r')
+
 PROTON_WG_ENDPOINT="${PROTON_WG_ENDPOINT:-nl-free-01.protonvpn.net:51820}"
 PROTON_WG_DNS="${PROTON_WG_DNS:-10.8.0.1}"
 PROTON_WG_ADDRESS="${PROTON_WG_ADDRESS:-10.8.0.2/32}"
 PROTON_WG_ALLOWED_IPS="${PROTON_WG_ALLOWED_IPS:-0.0.0.0/0,::/0}"
 
 TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
+TAILSCALE_AUTH_KEY=$(echo -n "$TAILSCALE_AUTH_KEY" | tr -d '\n\r')
+
 TAILSCALE_HOSTNAME="${TAILSCALE_HOSTNAME:-proton-exit-node}"
 TAILSCALE_ADVERTISE_ROUTES="${TAILSCALE_ADVERTISE_ROUTES:-}"
 TAILSCALE_ACCEPT_DNS="${TAILSCALE_ACCEPT_DNS:-false}"
@@ -56,21 +63,37 @@ validate_config() {
 setup_wireguard() {
     log "Setting up WireGuard configuration..."
     
-    cat > /etc/wireguard/wg0.conf << EOF
-[Interface]
-PrivateKey = ${PROTON_WG_PRIVATE_KEY}
-Address = ${PROTON_WG_ADDRESS}
-DNS = ${PROTON_WG_DNS}
-
-[Peer]
-PublicKey = ${PROTON_WG_PUBLIC_KEY}
-AllowedIPs = ${PROTON_WG_ALLOWED_IPS}
-Endpoint = ${PROTON_WG_ENDPOINT}
-PersistentKeepalive = 25
-EOF
+    # Validate key lengths (WireGuard keys are base64 encoded, should be ~44 chars)
+    if [[ ${#PROTON_WG_PRIVATE_KEY} -lt 40 ]]; then
+        error "PROTON_WG_PRIVATE_KEY appears to be invalid (length: ${#PROTON_WG_PRIVATE_KEY}, expected ~44 chars). Check your .env file."
+    fi
+    
+    if [[ ${#PROTON_WG_PUBLIC_KEY} -lt 40 ]]; then
+        error "PROTON_WG_PUBLIC_KEY appears to be invalid (length: ${#PROTON_WG_PUBLIC_KEY}, expected ~44 chars). Check your .env file."
+    fi
+    
+    # Create config file line by line to avoid heredoc issues
+    log "Creating WireGuard config with Address=${PROTON_WG_ADDRESS}"
+    
+    echo "[Interface]" > /etc/wireguard/wg0.conf
+    echo "PrivateKey = ${PROTON_WG_PRIVATE_KEY}" >> /etc/wireguard/wg0.conf
+    echo "Address = ${PROTON_WG_ADDRESS}" >> /etc/wireguard/wg0.conf
+    echo "DNS = ${PROTON_WG_DNS}" >> /etc/wireguard/wg0.conf
+    echo "" >> /etc/wireguard/wg0.conf
+    echo "[Peer]" >> /etc/wireguard/wg0.conf
+    echo "PublicKey = ${PROTON_WG_PUBLIC_KEY}" >> /etc/wireguard/wg0.conf
+    echo "AllowedIPs = ${PROTON_WG_ALLOWED_IPS}" >> /etc/wireguard/wg0.conf
+    echo "Endpoint = ${PROTON_WG_ENDPOINT}" >> /etc/wireguard/wg0.conf
+    echo "PersistentKeepalive = 25" >> /etc/wireguard/wg0.conf
     
     chmod 600 /etc/wireguard/wg0.conf
     log "WireGuard configuration created at /etc/wireguard/wg0.conf"
+    
+    # Debug: Show first few lines of config (hiding keys)
+    log "Config file preview:"
+    head -3 /etc/wireguard/wg0.conf | sed 's/PrivateKey = .*/PrivateKey = [HIDDEN]/' | while read line; do
+        log "  $line"
+    done
 }
 
 # Enable IP forwarding and configure sysctl for persistence
