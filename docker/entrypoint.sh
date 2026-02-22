@@ -181,6 +181,12 @@ apply_kill_switch() {
         iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
         iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
         
+        # Allow Docker internal DNS (required for container DNS resolution)
+        iptables -A OUTPUT -d 127.0.0.11 -p udp --dport 53 -j ACCEPT
+        iptables -A OUTPUT -d 127.0.0.11 -p tcp --dport 53 -j ACCEPT
+        iptables -A INPUT -s 127.0.0.11 -p udp --sport 53 -j ACCEPT
+        iptables -A INPUT -s 127.0.0.11 -p tcp --sport 53 -j ACCEPT
+        
         # Allow ICMP (ping)
         iptables -A OUTPUT -p icmp -j ACCEPT
         iptables -A INPUT -p icmp -j ACCEPT
