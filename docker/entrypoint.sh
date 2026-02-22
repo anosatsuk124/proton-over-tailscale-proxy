@@ -235,6 +235,15 @@ start_wireguard() {
     log "Adding IP address ${PROTON_WG_ADDRESS} to wg0..."
     ip address add ${PROTON_WG_ADDRESS} dev wg0
     
+    # Extract ProtonVPN endpoint IP (remove port)
+    local proton_endpoint_ip=$(echo "$PROTON_WG_ENDPOINT" | cut -d':' -f1)
+    log "Adding route to ProtonVPN endpoint ${proton_endpoint_ip} through eth0..."
+    
+    # Add route to ProtonVPN endpoint through eth0 (so WireGuard can reach it)
+    ip route add ${proton_endpoint_ip} via 172.20.0.1 dev eth0 2>/dev/null || \
+        ip route replace ${proton_endpoint_ip} via 172.20.0.1 dev eth0 2>/dev/null || \
+        log "Note: Could not add route to ${proton_endpoint_ip}, WireGuard may use default gateway"
+    
     # Add route through WireGuard
     log "Setting default route through WireGuard..."
     ip route add default dev wg0 2>/dev/null || ip route replace default dev wg0
