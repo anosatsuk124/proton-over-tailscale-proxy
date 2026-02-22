@@ -372,11 +372,37 @@ main() {
     validate_config
     setup_wireguard
     setup_networking
-    apply_kill_switch
     
-    # Start services
+    # Start services WITHOUT kill switch first
+    # This allows Tailscale to connect to control plane
+    log "Starting services without kill switch to allow initial connectivity..."
     start_wireguard
     start_tailscale
+    
+    # Wait for Tailscale to be ready (give it time to authenticate)
+    log "Waiting for Tailscale to establish connection..."
+    local attempts=0
+    local max_attempts=30
+    while [[ $attempts -lt $max_attempts ]]; do
+        if tailscale status --json 2>/dev/null | grep -q '"Online":true'; then
+            log "Tailscale is connected!"
+            break
+        fi
+        attempts=$((attempts + 1))
+        log "Waiting for Tailscale connection... ($attempts/$max_attempts)"
+        sleep 2
+    done
+    
+    # Now apply kill switch after services are established
+    if [[ "$KILL_SWITCH" == "true" ]]; then
+        if [[ $attempts -lt $max_attempts ]]; then
+            log "Services are ready, applying kill switch..."
+            apply_kill_switch
+        else
+            log "WARNING: Tailscale failed to connect, kill switch NOT applied to allow debugging"
+            log "Check your .env configuration and network connectivity"
+        fi
+    fi
     
     log "All services started successfully!"
     log "This node is now advertising as an exit node on your Tailscale network"
