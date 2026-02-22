@@ -59,7 +59,7 @@ validate_config() {
     log "Configuration validation passed"
 }
 
-# Setup WireGuard configuration
+# Setup WireGuard configuration file (for reference, not used directly)
 setup_wireguard() {
     log "Setting up WireGuard configuration..."
     
@@ -72,7 +72,7 @@ setup_wireguard() {
         error "PROTON_WG_PUBLIC_KEY appears to be invalid (length: ${#PROTON_WG_PUBLIC_KEY}, expected ~44 chars). Check your .env file."
     fi
     
-    # Create config file line by line to avoid heredoc issues
+    # Create config file line by line for reference/debugging purposes
     log "Creating WireGuard config with Address=${PROTON_WG_ADDRESS}"
     
     echo "[Interface]" > /etc/wireguard/wg0.conf
@@ -87,7 +87,7 @@ setup_wireguard() {
     echo "PersistentKeepalive = 25" >> /etc/wireguard/wg0.conf
     
     chmod 600 /etc/wireguard/wg0.conf
-    log "WireGuard configuration created at /etc/wireguard/wg0.conf"
+    log "WireGuard configuration saved to /etc/wireguard/wg0.conf (for reference only)"
     
     # Debug: Show first few lines of config (hiding keys)
     log "Config file preview:"
@@ -214,17 +214,30 @@ start_wireguard() {
     # Create WireGuard interface
     ip link add wg0 type wireguard 2>/dev/null || true
     
-    # Apply configuration
-    wg setconf wg0 /etc/wireguard/wg0.conf
+    # Configure WireGuard using wg command directly
+    # wg setconf doesn't understand Address/DNS fields, so we use wg set instead
+    log "Setting WireGuard private key..."
+    wg set wg0 private-key <(echo "${PROTON_WG_PRIVATE_KEY}")
+    
+    log "Adding WireGuard peer..."
+    wg set wg0 peer "${PROTON_WG_PUBLIC_KEY}" allowed-ips "${PROTON_WG_ALLOWED_IPS}" endpoint "${PROTON_WG_ENDPOINT}" persistent-keepalive 25
     
     # Bring up interface
     ip link set up wg0
     
     # Add IP address
+    log "Adding IP address ${PROTON_WG_ADDRESS} to wg0..."
     ip address add ${PROTON_WG_ADDRESS} dev wg0
     
     # Add route through WireGuard
+    log "Setting default route through WireGuard..."
     ip route add default dev wg0 2>/dev/null || ip route replace default dev wg0
+    
+    # Show WireGuard status for debugging
+    log "WireGuard status:"
+    wg show wg0 | head -5 | while read line; do
+        log "  $line"
+    done
     
     log "WireGuard started successfully"
 }
