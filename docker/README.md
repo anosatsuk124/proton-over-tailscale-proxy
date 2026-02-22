@@ -275,7 +275,7 @@ docker run -d \
 
 ## License
 
-MIT License
+Apache License 2.0
 
 ## Contributing
 
