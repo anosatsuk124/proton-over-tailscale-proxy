@@ -1,20 +1,19 @@
-# ProtonVPN + Tailscale Exit Node with SOCKS5/HTTP Proxy
-# Alpine Linux based minimal image
+# ProtonVPN + Tailscale Exit Node
+# Routes all Tailscale client traffic through ProtonVPN via WireGuard
+# Uses Tailscale userspace networking for container compatibility
 
 FROM alpine:3.19
 
 LABEL maintainer="ProtonVPN-over-Tailscale"
-LABEL description="Container that routes traffic through ProtonVPN via WireGuard and provides SOCKS5/HTTP proxy through Tailscale"
+LABEL description="Container that routes Tailscale exit node traffic through ProtonVPN via WireGuard"
 
 # Install required packages
-# wireguard-tools: WireGuard configuration and management (>2k stars)
-# tailscale: Tailscale VPN client (>15k stars)
-# iproute2, iptables: Network routing and firewall
+# wireguard-tools: WireGuard configuration and management
+# iproute2, iptables: Network routing and firewall for exit node
 # curl: Health checks and HTTP requests
 # bash: Script execution
-# supervisor: Process management (>6k stars)
-# dante-server: SOCKS5 proxy server (well-established)
-# tinyproxy: Lightweight HTTP proxy (well-established)
+# supervisor: Process management
+# ca-certificates: SSL/TLS certificates
 RUN apk add --no-cache \
     wireguard-tools \
     iproute2 \
@@ -23,13 +22,10 @@ RUN apk add --no-cache \
     curl \
     bash \
     supervisor \
-    dante-server \
-    tinyproxy \
     ca-certificates \
     && rm -rf /var/cache/apk/*
 
 # Install Tailscale (official binary)
-# Tailscale has >15k GitHub stars, well-established
 ARG TAILSCALE_VERSION=1.58.2
 RUN apk add --no-cache --virtual .build-deps \
     tar \
@@ -43,25 +39,24 @@ RUN apk add --no-cache --virtual .build-deps \
     && apk del .build-deps
 
 # Create necessary directories
-RUN mkdir -p /etc/wireguard /var/run/tailscale /etc/supervisor.d /app /var/log /var/run/tinyproxy /etc/tinyproxy
+RUN mkdir -p /etc/wireguard /var/run/tailscale /etc/supervisor.d /app /var/log /var/lib/tailscale
 
 # Copy configuration and scripts
 COPY entrypoint.sh /app/entrypoint.sh
 COPY wireguard-setup.sh /app/wireguard-setup.sh
 COPY supervisord.conf /etc/supervisord.conf
-COPY config/dante.conf /etc/dante.conf
-COPY config/tinyproxy.conf /etc/tinyproxy/tinyproxy.conf
 
 # Make scripts executable
 RUN chmod +x /app/entrypoint.sh /app/wireguard-setup.sh
 
-# Expose proxy ports
-# 1080 - SOCKS5 proxy
-# 8080 - HTTP proxy
-# 41641/udp - Tailscale
-EXPOSE 1080 8080 41641/udp
+# Expose Tailscale port only (no proxy ports needed for exit node)
+# 41641/udp - Tailscale wireguard port
+EXPOSE 41641/udp
 
-# Health check - verify VPN, Tailscale, and proxies are operational
+# Note: This container requires NET_ADMIN capability for VPN functionality
+# Run with: --cap-add=NET_ADMIN --cap-add=SYS_MODULE --device=/dev/net/tun
+
+# Health check - verify VPN and Tailscale are operational
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD /app/entrypoint.sh healthcheck || exit 1
 

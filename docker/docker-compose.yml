@@ -9,12 +9,20 @@ services:
     restart: unless-stopped
     
     # Required capabilities for VPN and networking
+    # NET_ADMIN: Required for managing network interfaces and iptables
+    # SYS_MODULE: Required for loading kernel modules (WireGuard)
+    # NET_RAW: Required for raw socket operations
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
       - NET_RAW
     
-    # Required for WireGuard kernel module
+    # Required device for TUN interface (optional, uses userspace networking by default)
+    # Uncomment if you want to use kernel TUN mode instead of userspace networking
+    # devices:
+    #   - /dev/net/tun:/dev/net/tun
+    
+    # Required for WireGuard kernel module and IP forwarding
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv4.ip_forward=1
@@ -38,12 +46,8 @@ services:
       - TAILSCALE_ADVERTISE_ROUTES=${TAILSCALE_ADVERTISE_ROUTES}
       - TAILSCALE_ACCEPT_DNS=${TAILSCALE_ACCEPT_DNS:-false}
       - TAILSCALE_SSH=${TAILSCALE_SSH:-true}
-      
-      # Proxy Configuration
-      - SOCKS5_PORT=${SOCKS5_PORT:-1080}
-      - HTTP_PROXY_PORT=${HTTP_PROXY_PORT:-8080}
-      - PROXY_USERNAME=${PROXY_USERNAME:-}
-      - PROXY_PASSWORD=${PROXY_PASSWORD:-}
+      # Userspace networking mode (recommended for containers, no TUN device needed)
+      - TAILSCALE_USERSPACE_NETWORKING=${TAILSCALE_USERSPACE_NETWORKING:-true}
       
       # Kill switch - block traffic if VPN disconnects
       - KILL_SWITCH=${KILL_SWITCH:-true}
@@ -55,13 +59,9 @@ services:
     volumes:
       - tailscale-state:/var/lib/tailscale
     
-    # Expose proxy ports to host
+    # Expose Tailscale port only (no proxy ports needed for exit node)
     ports:
-      - "${SOCKS5_PORT:-1080}:1080"
-      - "${HTTP_PROXY_PORT:-8080}:8080"
-    
-    # Network mode required for VPN
-    network_mode: host
+      - "41641:41641/udp"
     
     # Logging configuration
     logging:

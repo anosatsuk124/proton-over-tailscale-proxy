@@ -8,8 +8,8 @@ export function ConfigView() {
   const [formData, setFormData] = useState({
     protonvpnServer: '',
     tailscaleHostname: '',
-    proxyPort: 8080,
     autoConnect: false,
+    advertiseExitNode: false,
   })
   const [saveStatus, setSaveStatus] = useState<string | null>(null)
 
@@ -19,8 +19,8 @@ export function ConfigView() {
       setFormData({
         protonvpnServer: config.protonvpnServer || '',
         tailscaleHostname: config.tailscaleHostname || '',
-        proxyPort: config.proxyPort || 8080,
         autoConnect: config.autoConnect || false,
+        advertiseExitNode: config.advertiseExitNode || false,
       })
     }
   }, [config])
@@ -30,7 +30,7 @@ export function ConfigView() {
     const { name, value, type, checked } = e.target
     setFormData(prev => ({
       ...prev,
-      [name]: type === 'checkbox' ? checked : type === 'number' ? parseInt(value) || 0 : value,
+      [name]: type === 'checkbox' ? checked : value,
     }))
     setSaveStatus(null)
   }
@@ -59,8 +59,8 @@ export function ConfigView() {
       setFormData({
         protonvpnServer: config.protonvpnServer || '',
         tailscaleHostname: config.tailscaleHostname || '',
-        proxyPort: config.proxyPort || 8080,
         autoConnect: config.autoConnect || false,
+        advertiseExitNode: config.advertiseExitNode || false,
       })
     }
     setIsEditing(false)
@@ -114,16 +114,16 @@ export function ConfigView() {
           </div>
 
           <div className="config-item">
-            <label className="config-label">Proxy Port</label>
-            <input
-              type="number"
-              name="proxyPort"
-              value={formData.proxyPort}
-              onChange={handleChange}
-              className="config-input"
-              min="1024"
-              max="65535"
-            />
+            <label className="config-label" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <input
+                type="checkbox"
+                name="advertiseExitNode"
+                checked={formData.advertiseExitNode}
+                onChange={handleChange}
+                style={{ width: 'auto' }}
+              />
+              Advertise as exit node
+            </label>
           </div>
 
           <div className="config-item">
@@ -174,8 +174,10 @@ export function ConfigView() {
           </div>
 
           <div className="config-item">
-            <span className="config-label">Proxy Port</span>
-            <span className="config-value">{config?.proxyPort || 8080}</span>
+            <span className="config-label">Advertise Exit Node</span>
+            <span className="config-value">
+              {config?.advertiseExitNode ? 'Yes' : 'No'}
+            </span>
           </div>
 
           <div className="config-item">

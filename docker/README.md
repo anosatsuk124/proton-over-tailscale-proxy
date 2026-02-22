@@ -5,8 +5,10 @@ A Docker container that combines ProtonVPN (via WireGuard) and Tailscale to crea
 ## Architecture
 
 ```
-[Your Device] --> [Tailscale] --> [This Container] --> [ProtonVPN WireGuard] --> [Internet]
+[Client Device] --> [Tailscale] --> [This Exit Node] --> [WireGuard] --> [ProtonVPN] --> [Internet]
 ```
+
+This container uses **Tailscale userspace networking** (`--tun=userspace-networking`) for better container compatibility and operates as a proper **Tailscale exit node** that can route all traffic from connected Tailscale clients through ProtonVPN.
 
 ## Prerequisites
 
@@ -20,7 +22,7 @@ A Docker container that combines ProtonVPN (via WireGuard) and Tailscale to crea
 ### 1. Get ProtonVPN WireGuard Configuration
 
 1. Log in to your ProtonVPN account at https://account.protonvpn.com
-2. Go to Downloads → WireGuard configuration
+2. Go to Downloads -> WireGuard configuration
 3. Download the configuration file for your preferred server
 4. Extract the following values:
    - `PrivateKey` (from [Interface] section)
@@ -79,6 +81,55 @@ docker-compose up -d
 docker-compose logs -f
 ```
 
+## Using the Exit Node
+
+### Enable Exit Node in Tailscale Admin Panel
+
+Once the container is running, you need to approve it as an exit node in the Tailscale admin console:
+
+1. Go to https://login.tailscale.com/admin/machines
+2. Find your exit node (named `proton-exit-node` by default)
+3. Click the "..." menu -> "Edit route settings..."
+4. Enable "Use as exit node"
+5. Click "Save"
+
+### Route Traffic Through Exit Node
+
+On any device in your Tailscale network:
+
+**Using Tailscale CLI:**
+```bash
+tailscale up --exit-node=proton-exit-node
+```
+
+Or use the Tailscale IP if hostname resolution is not working:
+```bash
+tailscale up --exit-node=100.x.x.x
+```
+
+**Using Tailscale GUI:**
+1. Open Tailscale app
+2. Click on your exit node
+3. Select "Use as exit node"
+
+### Verify Traffic Flow
+
+On a device routing through the exit node:
+```bash
+# Check your public IP
+curl https://ipinfo.io
+
+# It should show the ProtonVPN server location, not your actual location
+```
+
+### Disable Exit Node
+
+To stop routing traffic through the exit node:
+
+```bash
+tailscale up --exit-node=
+```
+
 ## Configuration Options
 
 ### Environment Variables
@@ -98,42 +149,6 @@ docker-compose logs -f
 | `TAILSCALE_ADVERTISE_ROUTES` | No | - | Additional routes to advertise |
 | `KILL_SWITCH` | No | `true` | Block traffic if VPN disconnects |
 | `HEALTH_CHECK_URL` | No | `https://ipinfo.io` | URL for health checks |
-
-## Using the Exit Node
-
-### Enable Exit Node in Tailscale
-
-Once the container is running, you need to approve it as an exit node in the Tailscale admin console:
-
-1. Go to https://login.tailscale.com/admin/machines
-2. Find your exit node (named `proton-exit-node` by default)
-3. Click the "..." menu → "Edit route settings..."
-4. Enable "Use as exit node"
-5. Click "Save"
-
-### Route Traffic Through Exit Node
-
-On any device in your Tailscale network:
-
-**Using Tailscale CLI:**
-```bash
-tailscale up --exit-node=proton-exit-node
-```
-
-**Using Tailscale GUI:**
-1. Open Tailscale app
-2. Click on your exit node
-3. Select "Use as exit node"
-
-### Verify Traffic Flow
-
-On a device routing through the exit node:
-```bash
-# Check your public IP
-curl https://ipinfo.io
-
-# It should show the ProtonVPN server location, not your actual location
-```
 
 ## Management Commands
 
@@ -163,7 +178,9 @@ docker-compose exec proton-tailscale-exit /app/entrypoint.sh healthcheck
 1. **Kill Switch**: Enabled by default. Blocks all traffic if VPN disconnects.
 2. **Environment Variables**: Never commit credentials to version control.
 3. **Host Network**: Container uses host networking for VPN functionality.
-4. **Capabilities**: Requires `NET_ADMIN`, `SYS_MODULE`, and `NET_RAW`.
+4. **Capabilities**: Requires `NET_ADMIN` and `SYS_MODULE` capabilities.
+5. **IP Forwarding**: Container enables IP forwarding for exit node functionality.
+6. **NAT/Masquerading**: Configured automatically to route traffic properly.
 
 ## Troubleshooting
 
@@ -179,6 +196,7 @@ Common issues:
 - Invalid ProtonVPN credentials
 - Invalid Tailscale auth key
 - Kernel module not loaded (try `modprobe wireguard` on host)
+- Missing NET_ADMIN capability
 
 ### VPN connection issues
 
@@ -186,6 +204,7 @@ Verify WireGuard configuration:
 ```bash
 docker-compose exec proton-tailscale-exit wg show
 docker-compose exec proton-tailscale-exit ip addr show wg0
+docker-compose exec proton-tailscale-exit ip route show
 ```
 
 ### Tailscale connection issues
@@ -194,13 +213,41 @@ Check Tailscale status:
 ```bash
 docker-compose exec proton-tailscale-exit tailscale status
 docker-compose exec proton-tailscale-exit tailscale netcheck
+docker-compose exec proton-tailscale-exit tailscale ip -4
 ```
+
+### Exit node not working
+
+1. Verify exit node is approved in Tailscale admin console
+2. Check that the exit node is advertising routes:
+   ```bash
+   docker-compose exec proton-tailscale-exit tailscale status
+   ```
+   You should see "exit node" in the status output.
+3. Ensure clients are configured to use the exit node:
+   ```bash
+   # On client machine
+   tailscale status
+   ```
+   Should show the exit node with "->" indicator.
 
 ### Health check failures
 
 Run manual health check:
 ```bash
 docker-compose exec proton-tailscale-exit /app/entrypoint.sh healthcheck
+```
+
+Check specific components:
+```bash
+# Check WireGuard
+docker-compose exec proton-tailscale-exit wg show wg0
+
+# Check Tailscale
+docker-compose exec proton-tailscale-exit tailscale status --json
+
+# Test internet connectivity
+docker-compose exec proton-tailscale-exit curl -s https://ipinfo.io
 ```
 
 ## Building from Source
@@ -218,7 +265,7 @@ docker run -d \
   --name proton-exit \
   --cap-add NET_ADMIN \
   --cap-add SYS_MODULE \
-  --cap-add NET_RAW \
+  --device /dev/net/tun \
   --sysctl net.ipv4.conf.all.src_valid_mark=1 \
   --sysctl net.ipv4.ip_forward=1 \
   --env-file .env \
@@ -237,5 +284,5 @@ Pull requests are welcome. For major changes, please open an issue first to disc
 ## Acknowledgments
 
 - [WireGuard](https://www.wireguard.com/) - Fast, modern, secure VPN tunnel
-- [Tailscale](https://tailscale.com/) - Zero config VPN
+- [Tailscale](https://tailscale.com/) - Zero config VPN with exit node support
 - [ProtonVPN](https://protonvpn.com/) - Secure VPN service

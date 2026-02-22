@@ -1,15 +1,14 @@
 use bollard::Docker;
 use bollard::container::{
-    InspectContainerOptions,
-    ListContainersOptions,
-    LogsOptions,
-    StartContainerOptions,
-    StopContainerOptions,
+    InspectContainerOptions, ListContainersOptions, LogsOptions,
+    StartContainerOptions, StopContainerOptions,
 };
+use bollard::exec::{CreateExecOptions, StartExecOptions};
 use bollard::models::ContainerSummary;
 use futures::StreamExt;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tokio::time::{timeout, Duration};
+use tracing::{debug, error, info, warn};
 use crate::error::ApiError;
 use crate::routes::connection::ConnectRequest;
 
@@ -121,11 +120,13 @@ impl DockerService {
     
     pub async fn stop_vpn(&self) -> Result<(), ApiError> {
         info!("Stopping VPN containers");
-        
+
         // Stop ProtonVPN first
-        match self.docker
+        match self
+            .docker
             .stop_container("proton-vpn", None::<StopContainerOptions>)
-            .await {
+            .await
+        {
             Ok(_) => info!("ProtonVPN container stopped"),
             Err(e) => {
                 if !e.to_string().contains("No such container") {
@@ -133,14 +134,16 @@ impl DockerService {
                 }
             }
         }
-        
+
         // Wait for VPN to stop
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        
+
         // Stop Tailscale
-        match self.docker
+        match self
+            .docker
             .stop_container("tailscale", None::<StopContainerOptions>)
-            .await {
+            .await
+        {
             Ok(_) => info!("Tailscale container stopped"),
             Err(e) => {
                 if !e.to_string().contains("No such container") {
@@ -148,7 +151,351 @@ impl DockerService {
                 }
             }
         }
-        
+
         Ok(())
     }
+
+    /// Check if the Tailscale exit node is properly advertised
+    pub async fn check_exit_node_advertised(&self) -> Result<bool, ApiError> {
+        debug!("Checking if exit node is advertised");
+
+        let exec = self
+            .docker
+            .create_exec(
+                "tailscale",
+                CreateExecOptions {
+                    cmd: Some(vec!["tailscale", "status", "--json"]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to create exec: {}", e)))?;
+
+        let mut output = String::new();
+        let start_result = self
+            .docker
+            .start_exec(&exec.id, None::<StartExecOptions>)
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to start exec: {}", e)))?;
+
+        if let bollard::exec::StartExecResults::Attached { output: mut stream, .. } = start_result {
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(bollard::container::LogOutput::StdOut { message }) => {
+                        output.push_str(&String::from_utf8_lossy(&message));
+                    }
+                    Ok(bollard::container::LogOutput::StdErr { message }) => {
+                        let stderr = String::from_utf8_lossy(&message);
+                        warn!("tailscale stderr: {}", stderr);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        match serde_json::from_str::<serde_json::Value>(&output) {
+            Ok(json) => {
+                let advertised = json["Self"]["ExitNode"].as_bool().unwrap_or(false);
+                info!("Exit node advertised: {}", advertised);
+                Ok(advertised)
+            }
+            Err(e) => {
+                warn!("Failed to parse tailscale status: {}", e);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Get exit node status from Tailscale
+    pub async fn get_exit_node_status(&self) -> Result<ExitNodeInfo, ApiError> {
+        debug!("Getting exit node status from Tailscale");
+
+        let exec = self
+            .docker
+            .create_exec(
+                "tailscale",
+                CreateExecOptions {
+                    cmd: Some(vec!["tailscale", "status", "--json"]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to create exec: {}", e)))?;
+
+        let mut output = String::new();
+        let start_result = self
+            .docker
+            .start_exec(&exec.id, None::<StartExecOptions>)
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to start exec: {}", e)))?;
+
+        if let bollard::exec::StartExecResults::Attached { output: mut stream, .. } = start_result {
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(bollard::container::LogOutput::StdOut { message }) => {
+                        output.push_str(&String::from_utf8_lossy(&message));
+                    }
+                    Ok(bollard::container::LogOutput::StdErr { message }) => {
+                        let stderr = String::from_utf8_lossy(&message);
+                        warn!("tailscale stderr: {}", stderr);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        match serde_json::from_str::<serde_json::Value>(&output) {
+            Ok(json) => {
+                let advertised = json["Self"]["ExitNode"].as_bool().unwrap_or(false);
+                let approved = json["Self"]["ExitNodeOption"]["Approved"]
+                    .as_bool()
+                    .unwrap_or(false);
+                let tailscale_ip = json["Self"]["TailscaleIPs"]
+                    .as_array()
+                    .and_then(|ips| ips.first())
+                    .and_then(|ip| ip.as_str())
+                    .map(|s| s.to_string());
+
+                // Count connected clients by checking peers that use this as exit node
+                let connected_clients = json["Peer"]
+                    .as_array()
+                    .map(|peers| {
+                        peers
+                            .iter()
+                            .filter(|peer| {
+                                peer["ExitNode"].as_bool().unwrap_or(false)
+                            })
+                            .count() as u32
+                    })
+                    .unwrap_or(0);
+
+                Ok(ExitNodeInfo {
+                    advertised,
+                    approved,
+                    connected_clients,
+                    tailscale_ip,
+                })
+            }
+            Err(e) => Err(ApiError::Docker(format!(
+                "Failed to parse tailscale status: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Enable exit node advertisement in Tailscale
+    pub async fn enable_exit_node(&self) -> Result<(), ApiError> {
+        info!("Enabling exit node advertisement");
+
+        // Run tailscale up with advertise-exit-node flag
+        let exec = self
+            .docker
+            .create_exec(
+                "tailscale",
+                CreateExecOptions {
+                    cmd: Some(vec!["tailscale", "up", "--advertise-exit-node"]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to create exec: {}", e)))?;
+
+        let start_result = self
+            .docker
+            .start_exec(&exec.id, None::<StartExecOptions>)
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to start exec: {}", e)))?;
+
+        if let bollard::exec::StartExecResults::Attached { output: mut stream, .. } = start_result {
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(bollard::container::LogOutput::StdOut { message }) => {
+                        let msg = String::from_utf8_lossy(&message);
+                        debug!("tailscale up output: {}", msg);
+                    }
+                    Ok(bollard::container::LogOutput::StdErr { message }) => {
+                        let stderr = String::from_utf8_lossy(&message);
+                        if stderr.contains("error") || stderr.contains("Error") {
+                            return Err(ApiError::Docker(format!(
+                                "Failed to enable exit node: {}",
+                                stderr
+                            )));
+                        }
+                        warn!("tailscale up stderr: {}", stderr);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Wait a moment for changes to take effect
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Verify exit node is now advertised
+        match timeout(Duration::from_secs(10), self.check_exit_node_advertised()).await {
+            Ok(Ok(true)) => {
+                info!("Exit node successfully enabled");
+                Ok(())
+            }
+            Ok(Ok(false)) => Err(ApiError::Docker(
+                "Exit node was not advertised after enabling".to_string(),
+            )),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(ApiError::Docker(
+                "Timeout waiting for exit node status".to_string(),
+            )),
+        }
+    }
+
+    /// Disable exit node advertisement
+    pub async fn disable_exit_node(&self) -> Result<(), ApiError> {
+        info!("Disabling exit node advertisement");
+
+        // Run tailscale up without advertise-exit-node flag
+        let exec = self
+            .docker
+            .create_exec(
+                "tailscale",
+                CreateExecOptions {
+                    cmd: Some(vec!["tailscale", "up"]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to create exec: {}", e)))?;
+
+        let start_result = self
+            .docker
+            .start_exec(&exec.id, None::<StartExecOptions>)
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to start exec: {}", e)))?;
+
+        if let bollard::exec::StartExecResults::Attached { output: mut stream, .. } = start_result {
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(bollard::container::LogOutput::StdOut { message }) => {
+                        let msg = String::from_utf8_lossy(&message);
+                        debug!("tailscale up output: {}", msg);
+                    }
+                    Ok(bollard::container::LogOutput::StdErr { message }) => {
+                        let stderr = String::from_utf8_lossy(&message);
+                        if stderr.contains("error") || stderr.contains("Error") {
+                            return Err(ApiError::Docker(format!(
+                                "Failed to disable exit node: {}",
+                                stderr
+                            )));
+                        }
+                        warn!("tailscale up stderr: {}", stderr);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        info!("Exit node advertisement disabled");
+        Ok(())
+    }
+
+    /// Approve exit node in Tailscale (requires admin privileges)
+    /// This is typically done via the Tailscale admin console, but we can check approval status
+    pub async fn check_exit_node_approval(&self) -> Result<bool, ApiError> {
+        debug!("Checking exit node approval status");
+
+        let status = self.get_exit_node_status().await?;
+        Ok(status.approved)
+    }
+
+    /// Start containers with exit node configuration
+    pub async fn start_vpn_with_exit_node(
+        &self,
+        _request: &ConnectRequest,
+        enable_exit_node: bool,
+    ) -> Result<(), ApiError> {
+        info!("Starting VPN containers with exit_node={}", enable_exit_node);
+
+        // Start Tailscale container first
+        match self
+            .docker
+            .start_container("tailscale", None::<StartContainerOptions<String>>)
+            .await
+        {
+            Ok(_) => info!("Tailscale container started"),
+            Err(e) => {
+                if e.to_string().contains("No such container") {
+                    warn!("Tailscale container not found, may need to be created");
+                } else {
+                    error!("Failed to start tailscale: {}", e);
+                }
+            }
+        }
+
+        // Wait a moment for Tailscale to initialize
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Configure exit node if requested
+        if enable_exit_node {
+            if let Err(e) = self.enable_exit_node().await {
+                warn!("Failed to enable exit node: {}", e);
+                // Continue anyway, VPN will still work without exit node
+            }
+        }
+
+        // Start ProtonVPN container
+        match self
+            .docker
+            .start_container("proton-vpn", None::<StartContainerOptions<String>>)
+            .await
+        {
+            Ok(_) => info!("ProtonVPN container started"),
+            Err(e) => {
+                if e.to_string().contains("No such container") {
+                    return Err(ApiError::Docker(
+                        "ProtonVPN container not found. Please ensure containers are created."
+                            .to_string(),
+                    ));
+                } else {
+                    return Err(ApiError::Docker(format!(
+                        "Failed to start ProtonVPN: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Stop VPN containers, handling exit node cleanup
+    pub async fn stop_vpn_with_exit_node(&self) -> Result<(), ApiError> {
+        info!("Stopping VPN containers with exit node cleanup");
+
+        // Disable exit node first to prevent connection issues
+        if let Err(e) = self.disable_exit_node().await {
+            warn!("Failed to disable exit node during shutdown: {}", e);
+        }
+
+        // Continue with normal stop
+        self.stop_vpn().await
+    }
+}
+
+/// Information about exit node status
+#[derive(Debug, Clone)]
+pub struct ExitNodeInfo {
+    /// Whether exit node is advertised
+    pub advertised: bool,
+    /// Whether exit node is approved
+    pub approved: bool,
+    /// Number of connected clients
+    pub connected_clients: u32,
+    /// Tailscale IP address
+    pub tailscale_ip: Option<String>,
 }

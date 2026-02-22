@@ -27,6 +27,8 @@ pub struct TailscaleConfig {
     pub container_name: String,
     pub image: String,
     pub auth_key_env: String,
+    /// Whether to automatically advertise as exit node on connect
+    pub advertise_exit_node: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +53,7 @@ impl Default for Config {
                 container_name: "tailscale".to_string(),
                 image: "tailscale/tailscale".to_string(),
                 auth_key_env: "TAILSCALE_AUTHKEY".to_string(),
+                advertise_exit_node: false,
             },
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),

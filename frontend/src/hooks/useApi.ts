@@ -3,14 +3,14 @@ import type { SystemStatus, ApiResponse, Config } from '../types'
 
 const API_BASE = '/api'
 
-// Custom hook for API communication with the Rust backend
+// Custom hook for API communication with the Rust backend for exit node operations
 export function useApi() {
   const [status, setStatus] = useState<SystemStatus | null>(null)
   const [config, setConfig] = useState<Config | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Fetch current system status
+  // Fetch current system status including exit node status
   const fetchStatus = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -45,8 +45,10 @@ export function useApi() {
     }
   }, [])
 
-  // Execute an action (connect/disconnect/restart)
-  const executeAction = useCallback(async (action: 'connect' | 'disconnect' | 'restart') => {
+  // Execute an exit node action (enable/disable/approve/restart)
+  const executeAction = useCallback(async (
+    action: 'enable_exit_node' | 'disable_exit_node' | 'approve_exit_node' | 'restart'
+  ) => {
     setLoading(true)
     setError(null)
     

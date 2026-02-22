@@ -11,6 +11,9 @@ pub enum ApiError {
     #[error("Docker error: {0}")]
     Docker(String),
 
+    #[error("Tailscale error: {0}")]
+    Tailscale(String),
+
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -62,6 +65,13 @@ impl IntoResponse for ApiError {
                 ErrorResponse {
                     error: "SerializationError".to_string(),
                     message: self.to_string(),
+                },
+            ),
+            ApiError::Tailscale(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorResponse {
+                    error: "TailscaleError".to_string(),
+                    message: msg.clone(),
                 },
             ),
             ApiError::Network(msg) => (

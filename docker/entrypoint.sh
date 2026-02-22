@@ -2,7 +2,7 @@
 set -e
 
 # ProtonVPN + Tailscale Exit Node Entrypoint
-# Manages WireGuard connection and Tailscale daemon
+# Routes all Tailscale client traffic through ProtonVPN via WireGuard
 
 # Configuration variables with defaults
 PROTON_WG_PRIVATE_KEY="${PROTON_WG_PRIVATE_KEY:-}"
@@ -17,6 +17,7 @@ TAILSCALE_HOSTNAME="${TAILSCALE_HOSTNAME:-proton-exit-node}"
 TAILSCALE_ADVERTISE_ROUTES="${TAILSCALE_ADVERTISE_ROUTES:-}"
 TAILSCALE_ACCEPT_DNS="${TAILSCALE_ACCEPT_DNS:-false}"
 TAILSCALE_SSH="${TAILSCALE_SSH:-true}"
+TAILSCALE_USERSPACE_NETWORKING="${TAILSCALE_USERSPACE_NETWORKING:-true}"
 
 KILL_SWITCH="${KILL_SWITCH:-true}"
 HEALTH_CHECK_URL="${HEALTH_CHECK_URL:-https://ipinfo.io}"
@@ -72,18 +73,51 @@ EOF
     log "WireGuard configuration created at /etc/wireguard/wg0.conf"
 }
 
-# Enable IP forwarding
+# Enable IP forwarding and configure sysctl for persistence
 setup_networking() {
-    log "Configuring networking..."
+    log "Configuring networking for exit node functionality..."
     
-    # Enable IP forwarding
+    # Enable IP forwarding (immediate)
     echo 1 > /proc/sys/net/ipv4/ip_forward
     echo 1 > /proc/sys/net/ipv6/conf/all/forwarding
     
     # Enable source route validation
     echo 1 > /proc/sys/net/ipv4/conf/all/src_valid_mark
     
-    log "Networking configured"
+    # Disable ICMP redirects
+    echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects
+    echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects
+    
+    # Configure sysctl.conf for persistence across reboots
+    cat >> /etc/sysctl.conf << 'EOF'
+
+# Tailscale Exit Node Configuration
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv4.conf.all.src_valid_mark = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+EOF
+    
+    log "Networking configured for IP forwarding"
+}
+
+# Setup NAT and masquerading for exit node traffic
+setup_nat() {
+    log "Setting up NAT and masquerading for exit node..."
+    
+    # Flush existing NAT rules
+    iptables -t nat -F 2>/dev/null || true
+    iptables -t nat -X 2>/dev/null || true
+    
+    # Enable masquerading for WireGuard interface
+    # This allows Tailscale client traffic to exit through ProtonVPN
+    iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
+    
+    # Also masquerade for tailscale0 interface if it exists
+    iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
+    
+    log "NAT/masquerading configured"
 }
 
 # Apply kill switch rules
@@ -111,13 +145,21 @@ apply_kill_switch() {
         # Allow WireGuard traffic
         iptables -A OUTPUT -p udp --dport 51820 -j ACCEPT
         
-        # Allow Tailscale traffic
+        # Allow Tailscale traffic (UDP and TCP for DERP relays)
         iptables -A OUTPUT -p udp --dport 41641 -j ACCEPT
+        iptables -A OUTPUT -p udp --dport 3478 -j ACCEPT  # STUN
+        iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT   # HTTPS for control plane
+        
+        # Allow incoming Tailscale connections
         iptables -A INPUT -p udp --dport 41641 -j ACCEPT
         
         # Allow DNS
         iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
         iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+        
+        # Allow ICMP (ping)
+        iptables -A OUTPUT -p icmp -j ACCEPT
+        iptables -A INPUT -p icmp -j ACCEPT
         
         # Allow traffic through WireGuard interface
         iptables -A INPUT -i wg0 -j ACCEPT
@@ -125,9 +167,19 @@ apply_kill_switch() {
         iptables -A FORWARD -i wg0 -j ACCEPT
         iptables -A FORWARD -o wg0 -j ACCEPT
         
+        # Allow traffic through Tailscale interface
+        iptables -A INPUT -i tailscale0 -j ACCEPT
+        iptables -A OUTPUT -o tailscale0 -j ACCEPT
+        iptables -A FORWARD -i tailscale0 -j ACCEPT
+        iptables -A FORWARD -o tailscale0 -j ACCEPT
+        
+        # Re-apply NAT after flushing
+        setup_nat
+        
         log "Kill switch applied"
     else
         log "Kill switch disabled"
+        setup_nat
     fi
 }
 
@@ -159,9 +211,9 @@ stop_wireguard() {
     ip link del wg0 2>/dev/null || true
 }
 
-# Start Tailscale
+# Start Tailscale with userspace networking
 start_tailscale() {
-    log "Starting Tailscale..."
+    log "Starting Tailscale with userspace networking..."
     
     # Build tailscale up command arguments
     local TS_ARGS=""
@@ -184,9 +236,18 @@ start_tailscale() {
         TS_ARGS="${TS_ARGS} --advertise-routes=${TAILSCALE_ADVERTISE_ROUTES}"
     fi
     
-    # Start tailscaled daemon
-    tailscaled --state=/var/lib/tailscale/tailscaled.state \
-               --socket=/var/run/tailscale/tailscaled.sock &
+    # Start tailscaled daemon with userspace networking for container compatibility
+    # This mode doesn't require /dev/net/tun device
+    if [[ "$TAILSCALE_USERSPACE_NETWORKING" == "true" ]]; then
+        log "Using userspace networking mode (no TUN device required)"
+        tailscaled --tun=userspace-networking \
+                   --state=/var/lib/tailscale/tailscaled.state \
+                   --socket=/var/run/tailscale/tailscaled.sock &
+    else
+        log "Using kernel TUN mode"
+        tailscaled --state=/var/lib/tailscale/tailscaled.state \
+                   --socket=/var/run/tailscale/tailscaled.sock &
+    fi
     
     local TSD_PID=$!
     
@@ -198,6 +259,10 @@ start_tailscale() {
     
     log "Tailscale started successfully with exit node enabled"
     log "Tailscale IP: $(tailscale ip -4 2>/dev/null || echo 'N/A')"
+    
+    # Display exit node status
+    log "Exit node status:"
+    tailscale status 2>/dev/null | head -5 || log "Status not available yet"
 }
 
 # Stop Tailscale
@@ -258,6 +323,7 @@ main() {
     fi
     
     log "Starting ProtonVPN + Tailscale Exit Node..."
+    log "Traffic flow: Tailscale clients -> Tailscale daemon -> WireGuard -> ProtonVPN"
     
     # Validate and setup
     validate_config
@@ -270,7 +336,8 @@ main() {
     start_tailscale
     
     log "All services started successfully!"
-    log "This node is now an exit node on your Tailscale network"
+    log "This node is now advertising as an exit node on your Tailscale network"
+    log "Enable it in Tailscale admin panel: https://login.tailscale.com/admin/machines"
     
     # Keep script running and monitor services
     while true; do

@@ -27,15 +27,12 @@ impl App {
         tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .init();
-        
+
         let config = ConfigService::load().await?;
         let docker = DockerService::new().await?;
-        
-        let state = Arc::new(AppState {
-            config,
-            docker,
-        });
-        
+
+        let state = Arc::new(AppState::new(config, docker));
+
         Ok(Self { state })
     }
     
@@ -66,6 +63,8 @@ impl App {
             // Connection control
             .route("/connect", post(routes::connection::connect))
             .route("/disconnect", post(routes::connection::disconnect))
+            // Exit node control
+            .route("/exit-node", post(routes::connection::toggle_exit_node))
             // Logs
             .route("/logs", get(routes::logs::get_logs))
             .route("/logs/stream", get(routes::logs::stream_logs))

@@ -1,7 +1,7 @@
 import { useRef, useEffect } from 'react'
 import { useLogs } from '../hooks/useLogs'
 
-// Component to display and manage system logs
+// Component to display and manage system logs including exit node logs
 export function LogViewer({ maxLines = 100 }: { maxLines?: number }) {
   const { 
     logs, 
@@ -35,6 +35,25 @@ export function LogViewer({ maxLines = 100 }: { maxLines?: number }) {
       default:
         return ''
     }
+  }
+
+  // Helper function to check if log is exit node related
+  const isExitNodeLog = (message: string, source: string): boolean => {
+    const exitNodeKeywords = [
+      'exit node',
+      'exit-node',
+      'advertise',
+      'approve',
+      'client connected',
+      'client disconnected',
+      'tailscale up',
+      'tailscale down'
+    ]
+    const lowerMessage = message.toLowerCase()
+    const lowerSource = source.toLowerCase()
+    return exitNodeKeywords.some(keyword => 
+      lowerMessage.includes(keyword) || lowerSource.includes(keyword)
+    )
   }
 
   return (
@@ -80,17 +99,26 @@ export function LogViewer({ maxLines = 100 }: { maxLines?: number }) {
             <span>No logs available</span>
           </div>
         ) : (
-          logs.map((log, index) => (
-            <div key={`${log.timestamp}-${index}`} className="log-entry">
-              <span className="log-timestamp">
-                {new Date(log.timestamp).toLocaleTimeString()}
-              </span>
-              <span className={getLevelClass(log.level)}>
-                [{log.level.toUpperCase()}]
-              </span>
-              <span> {log.source}: {log.message}</span>
-            </div>
-          ))
+          logs.map((log, index) => {
+            const isExitNode = isExitNodeLog(log.message, log.source)
+            return (
+              <div 
+                key={`${log.timestamp}-${index}`} 
+                className={`log-entry ${isExitNode ? 'log-entry-exit-node' : ''}`}
+              >
+                <span className="log-timestamp">
+                  {new Date(log.timestamp).toLocaleTimeString()}
+                </span>
+                <span className={getLevelClass(log.level)}>
+                  [{log.level.toUpperCase()}]
+                </span>
+                {isExitNode && (
+                  <span className="log-badge">EXIT-NODE</span>
+                )}
+                <span> {log.source}: {log.message}</span>
+              </div>
+            )
+          })
         )}
       </div>
 
