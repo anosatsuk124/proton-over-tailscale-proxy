@@ -1,0 +1,43 @@
+[package]
+name = "proton-vpn-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# HTTP framework - 17k+ stars on GitHub
+axum = { version = "0.7", features = ["http1", "tokio"] }
+
+# Async runtime - 26k+ stars on GitHub
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs"] }
+
+# Serialization - 9k+ stars on GitHub
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging - 5k+ stars on GitHub
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Error handling - 1.5k stars (this-or-anyhow)
+thiserror = "2"
+
+# Docker API - 2k+ stars on GitHub
+bollard = "0.16"
+
+# Configuration management - 2k+ stars on GitHub
+config = { version = "0.14", default-features = false, features = ["json", "toml", "yaml"] }
+
+# Tower middleware (comes with axum)
+tower-http = { version = "0.5", features = ["trace", "cors", "fs"] }
+
+# Futures for async streams
+futures = "0.3"
+
+# TOML parsing for config
+serde_yaml = "0.9"
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

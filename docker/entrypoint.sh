@@ -1,0 +1,294 @@
+#!/bin/bash
+set -e
+
+# ProtonVPN + Tailscale Exit Node Entrypoint
+# Manages WireGuard connection and Tailscale daemon
+
+# Configuration variables with defaults
+PROTON_WG_PRIVATE_KEY="${PROTON_WG_PRIVATE_KEY:-}"
+PROTON_WG_PUBLIC_KEY="${PROTON_WG_PUBLIC_KEY:-}"
+PROTON_WG_ENDPOINT="${PROTON_WG_ENDPOINT:-nl-free-01.protonvpn.net:51820}"
+PROTON_WG_DNS="${PROTON_WG_DNS:-10.8.0.1}"
+PROTON_WG_ADDRESS="${PROTON_WG_ADDRESS:-10.8.0.2/32}"
+PROTON_WG_ALLOWED_IPS="${PROTON_WG_ALLOWED_IPS:-0.0.0.0/0,::/0}"
+
+TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
+TAILSCALE_HOSTNAME="${TAILSCALE_HOSTNAME:-proton-exit-node}"
+TAILSCALE_ADVERTISE_ROUTES="${TAILSCALE_ADVERTISE_ROUTES:-}"
+TAILSCALE_ACCEPT_DNS="${TAILSCALE_ACCEPT_DNS:-false}"
+TAILSCALE_SSH="${TAILSCALE_SSH:-true}"
+
+KILL_SWITCH="${KILL_SWITCH:-true}"
+HEALTH_CHECK_URL="${HEALTH_CHECK_URL:-https://ipinfo.io}"
+
+# Logging function
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+# Error handling function
+error() {
+    log "ERROR: $1" >&2
+    exit 1
+}
+
+# Validate required environment variables
+validate_config() {
+    log "Validating configuration..."
+    
+    if [[ -z "$PROTON_WG_PRIVATE_KEY" ]]; then
+        error "PROTON_WG_PRIVATE_KEY is required. Get it from your ProtonVPN WireGuard configuration."
+    fi
+    
+    if [[ -z "$PROTON_WG_PUBLIC_KEY" ]]; then
+        error "PROTON_WG_PUBLIC_KEY is required. Get it from your ProtonVPN WireGuard configuration."
+    fi
+    
+    if [[ -z "$TAILSCALE_AUTH_KEY" ]]; then
+        error "TAILSCALE_AUTH_KEY is required. Generate one at https://login.tailscale.com/admin/settings/keys"
+    fi
+    
+    log "Configuration validation passed"
+}
+
+# Setup WireGuard configuration
+setup_wireguard() {
+    log "Setting up WireGuard configuration..."
+    
+    cat > /etc/wireguard/wg0.conf << EOF
+[Interface]
+PrivateKey = ${PROTON_WG_PRIVATE_KEY}
+Address = ${PROTON_WG_ADDRESS}
+DNS = ${PROTON_WG_DNS}
+
+[Peer]
+PublicKey = ${PROTON_WG_PUBLIC_KEY}
+AllowedIPs = ${PROTON_WG_ALLOWED_IPS}
+Endpoint = ${PROTON_WG_ENDPOINT}
+PersistentKeepalive = 25
+EOF
+    
+    chmod 600 /etc/wireguard/wg0.conf
+    log "WireGuard configuration created at /etc/wireguard/wg0.conf"
+}
+
+# Enable IP forwarding
+setup_networking() {
+    log "Configuring networking..."
+    
+    # Enable IP forwarding
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    echo 1 > /proc/sys/net/ipv6/conf/all/forwarding
+    
+    # Enable source route validation
+    echo 1 > /proc/sys/net/ipv4/conf/all/src_valid_mark
+    
+    log "Networking configured"
+}
+
+# Apply kill switch rules
+apply_kill_switch() {
+    if [[ "$KILL_SWITCH" == "true" ]]; then
+        log "Applying kill switch rules..."
+        
+        # Flush existing rules
+        iptables -F 2>/dev/null || true
+        iptables -t nat -F 2>/dev/null || true
+        
+        # Default drop policy
+        iptables -P INPUT DROP
+        iptables -P FORWARD DROP
+        iptables -P OUTPUT DROP
+        
+        # Allow loopback
+        iptables -A INPUT -i lo -j ACCEPT
+        iptables -A OUTPUT -o lo -j ACCEPT
+        
+        # Allow established connections
+        iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        
+        # Allow WireGuard traffic
+        iptables -A OUTPUT -p udp --dport 51820 -j ACCEPT
+        
+        # Allow Tailscale traffic
+        iptables -A OUTPUT -p udp --dport 41641 -j ACCEPT
+        iptables -A INPUT -p udp --dport 41641 -j ACCEPT
+        
+        # Allow DNS
+        iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+        iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+        
+        # Allow traffic through WireGuard interface
+        iptables -A INPUT -i wg0 -j ACCEPT
+        iptables -A OUTPUT -o wg0 -j ACCEPT
+        iptables -A FORWARD -i wg0 -j ACCEPT
+        iptables -A FORWARD -o wg0 -j ACCEPT
+        
+        log "Kill switch applied"
+    else
+        log "Kill switch disabled"
+    fi
+}
+
+# Start WireGuard
+start_wireguard() {
+    log "Starting WireGuard..."
+    
+    # Create WireGuard interface
+    ip link add wg0 type wireguard 2>/dev/null || true
+    
+    # Apply configuration
+    wg setconf wg0 /etc/wireguard/wg0.conf
+    
+    # Bring up interface
+    ip link set up wg0
+    
+    # Add IP address
+    ip address add ${PROTON_WG_ADDRESS} dev wg0
+    
+    # Add route through WireGuard
+    ip route add default dev wg0 2>/dev/null || ip route replace default dev wg0
+    
+    log "WireGuard started successfully"
+}
+
+# Stop WireGuard
+stop_wireguard() {
+    log "Stopping WireGuard..."
+    ip link del wg0 2>/dev/null || true
+}
+
+# Start Tailscale
+start_tailscale() {
+    log "Starting Tailscale..."
+    
+    # Build tailscale up command arguments
+    local TS_ARGS=""
+    
+    TS_ARGS="${TS_ARGS} --authkey=${TAILSCALE_AUTH_KEY}"
+    TS_ARGS="${TS_ARGS} --hostname=${TAILSCALE_HOSTNAME}"
+    TS_ARGS="${TS_ARGS} --advertise-exit-node"
+    
+    if [[ "$TAILSCALE_ACCEPT_DNS" == "true" ]]; then
+        TS_ARGS="${TS_ARGS} --accept-dns=true"
+    else
+        TS_ARGS="${TS_ARGS} --accept-dns=false"
+    fi
+    
+    if [[ "$TAILSCALE_SSH" == "true" ]]; then
+        TS_ARGS="${TS_ARGS} --ssh"
+    fi
+    
+    if [[ -n "$TAILSCALE_ADVERTISE_ROUTES" ]]; then
+        TS_ARGS="${TS_ARGS} --advertise-routes=${TAILSCALE_ADVERTISE_ROUTES}"
+    fi
+    
+    # Start tailscaled daemon
+    tailscaled --state=/var/lib/tailscale/tailscaled.state \
+               --socket=/var/run/tailscale/tailscaled.sock &
+    
+    local TSD_PID=$!
+    
+    # Wait for daemon to start
+    sleep 2
+    
+    # Bring up Tailscale
+    tailscale up ${TS_ARGS}
+    
+    log "Tailscale started successfully with exit node enabled"
+    log "Tailscale IP: $(tailscale ip -4 2>/dev/null || echo 'N/A')"
+}
+
+# Stop Tailscale
+stop_tailscale() {
+    log "Stopping Tailscale..."
+    tailscale down 2>/dev/null || true
+    pkill tailscaled 2>/dev/null || true
+}
+
+# Cleanup function
+cleanup() {
+    log "Received shutdown signal, cleaning up..."
+    stop_tailscale
+    stop_wireguard
+    log "Cleanup complete"
+    exit 0
+}
+
+# Health check function
+healthcheck() {
+    # Check if WireGuard interface exists and is up
+    if ! ip link show wg0 >/dev/null 2>&1; then
+        echo "FAIL: WireGuard interface not found"
+        return 1
+    fi
+    
+    # Check if Tailscale is running
+    if ! pgrep tailscaled >/dev/null 2>&1; then
+        echo "FAIL: Tailscale daemon not running"
+        return 1
+    fi
+    
+    # Check if Tailscale is connected
+    if ! tailscale status --json 2>/dev/null | grep -q '"Online":true'; then
+        echo "FAIL: Tailscale not connected"
+        return 1
+    fi
+    
+    # Check internet connectivity through VPN
+    if ! curl -s --max-time 10 -o /dev/null -w "%{http_code}" "$HEALTH_CHECK_URL" | grep -q "200"; then
+        echo "FAIL: Cannot reach internet through VPN"
+        return 1
+    fi
+    
+    echo "OK: All services healthy"
+    return 0
+}
+
+# Main function
+main() {
+    # Set up signal handlers
+    trap cleanup SIGTERM SIGINT
+    
+    # Check if healthcheck mode
+    if [[ "$1" == "healthcheck" ]]; then
+        healthcheck
+        exit $?
+    fi
+    
+    log "Starting ProtonVPN + Tailscale Exit Node..."
+    
+    # Validate and setup
+    validate_config
+    setup_wireguard
+    setup_networking
+    apply_kill_switch
+    
+    # Start services
+    start_wireguard
+    start_tailscale
+    
+    log "All services started successfully!"
+    log "This node is now an exit node on your Tailscale network"
+    
+    # Keep script running and monitor services
+    while true; do
+        # Check WireGuard
+        if ! ip link show wg0 >/dev/null 2>&1; then
+            log "WireGuard interface down, attempting to restart..."
+            start_wireguard
+        fi
+        
+        # Check Tailscale
+        if ! pgrep tailscaled >/dev/null 2>&1; then
+            log "Tailscale daemon down, attempting to restart..."
+            start_tailscale
+        fi
+        
+        sleep 30
+    done
+}
+
+# Run main function
+main "$@"

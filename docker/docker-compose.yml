@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  proton-tailscale-exit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: proton-tailscale-exit-node
+    restart: unless-stopped
+    
+    # Required capabilities for VPN and networking
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+      - NET_RAW
+    
+    # Required for WireGuard kernel module
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+    
+    # Environment variables for configuration
+    environment:
+      # ProtonVPN Configuration
+      # Get WireGuard config from ProtonVPN account settings
+      - PROTON_WG_PRIVATE_KEY=${PROTON_WG_PRIVATE_KEY}
+      - PROTON_WG_PUBLIC_KEY=${PROTON_WG_PUBLIC_KEY}
+      - PROTON_WG_ENDPOINT=${PROTON_WG_ENDPOINT:-nl-free-01.protonvpn.net:51820}
+      - PROTON_WG_DNS=${PROTON_WG_DNS:-10.8.0.1}
+      - PROTON_WG_ADDRESS=${PROTON_WG_ADDRESS:-10.8.0.2/32}
+      - PROTON_WG_ALLOWED_IPS=${PROTON_WG_ALLOWED_IPS:-0.0.0.0/0,::/0}
+      
+      # Tailscale Configuration
+      # Get auth key from Tailscale admin console: https://login.tailscale.com/admin/settings/keys
+      - TAILSCALE_AUTH_KEY=${TAILSCALE_AUTH_KEY}
+      - TAILSCALE_HOSTNAME=${TAILSCALE_HOSTNAME:-proton-exit-node}
+      - TAILSCALE_ADVERTISE_ROUTES=${TAILSCALE_ADVERTISE_ROUTES}
+      - TAILSCALE_ACCEPT_DNS=${TAILSCALE_ACCEPT_DNS:-false}
+      - TAILSCALE_SSH=${TAILSCALE_SSH:-true}
+      
+      # Proxy Configuration
+      - SOCKS5_PORT=${SOCKS5_PORT:-1080}
+      - HTTP_PROXY_PORT=${HTTP_PROXY_PORT:-8080}
+      - PROXY_USERNAME=${PROXY_USERNAME:-}
+      - PROXY_PASSWORD=${PROXY_PASSWORD:-}
+      
+      # Kill switch - block traffic if VPN disconnects
+      - KILL_SWITCH=${KILL_SWITCH:-true}
+      
+      # Health check target (for verification)
+      - HEALTH_CHECK_URL=${HEALTH_CHECK_URL:-https://ipinfo.io}
+    
+    # Volume for persistent Tailscale state
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    
+    # Expose proxy ports to host
+    ports:
+      - "${SOCKS5_PORT:-1080}:1080"
+      - "${HTTP_PROXY_PORT:-8080}:8080"
+    
+    # Network mode required for VPN
+    network_mode: host
+    
+    # Logging configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Health check configuration
+    healthcheck:
+      test: ["CMD", "/app/entrypoint.sh", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  tailscale-state:
+    driver: local
