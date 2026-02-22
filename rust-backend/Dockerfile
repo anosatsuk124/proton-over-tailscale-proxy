@@ -1,7 +1,7 @@
 # ProtonVPN Tailscale Exit Node - Production Dockerfile
 # Multi-stage build for minimal image size
 
-FROM rust:1.75-alpine AS builder
+FROM rust:1.78-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache musl-dev openssl-dev pkgconfig

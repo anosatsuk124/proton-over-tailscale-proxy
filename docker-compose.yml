@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ProtonVPN + Tailscale Exit Node Container
   # This is the core service that connects to ProtonVPN and advertises as Tailscale exit node
