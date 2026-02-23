@@ -106,8 +106,6 @@ function error(msg: string): never {
 
 // Cached eth0 gateway address, detected once at startup
 let gateway = "";
-// Actual UDP port tailscaled binds to (detected at runtime)
-let tailscaledActualPort = 0;
 
 async function detectAndCacheGateway(): Promise<string> {
   const routeOutput = await $`ip route show dev eth0`.nothrow().quiet();
@@ -128,30 +126,6 @@ async function detectAndCacheGateway(): Promise<string> {
     }
   }
   error("Could not detect eth0 gateway. Check Docker network configuration.");
-}
-
-async function detectTailscaledPort(configPort: number): Promise<number> {
-  // Detect the actual UDP port tailscaled is listening on,
-  // since it may differ from the configured --port value
-  const ss = await $`ss -ulnp`.nothrow().quiet();
-  if (ss.exitCode === 0) {
-    for (const line of ss.text().split("\n")) {
-      if (line.includes("tailscaled")) {
-        const match = line.match(/0\.0\.0\.0:(\d+)/);
-        if (match) {
-          const port = parseInt(match[1], 10);
-          if (port !== configPort) {
-            log(`WARNING: tailscaled bound to port ${port} instead of configured ${configPort}`);
-          }
-          tailscaledActualPort = port;
-          return port;
-        }
-      }
-    }
-  }
-  log(`Could not detect tailscaled port, using configured port ${configPort}`);
-  tailscaledActualPort = configPort;
-  return configPort;
 }
 
 // --- DNS ---
@@ -411,7 +385,7 @@ async function setupNat(config: Config): Promise<void> {
 
   // MASQUERADE for STUN/data port bypass packets routed via eth0
   if (config.bypass.stun || config.bypass.dataPort) {
-    await $`iptables -t nat -A POSTROUTING -o eth0 -m mark --mark 0x100 -j MASQUERADE`;
+    await $`iptables -t nat -A POSTROUTING -o eth0 -m mark --mark 0x100/0x100 -j MASQUERADE`;
   }
 
   log("NAT/masquerading configured");
@@ -448,20 +422,12 @@ async function applyKillSwitch(config: Config): Promise<void> {
   await $`iptables -A OUTPUT -p udp --dport 51820 -j ACCEPT`;
 
   // Allow Tailscale traffic (UDP and TCP for DERP relays)
-  // Use both configured and actual port in case they differ
-  const tsPort = tailscaledActualPort || config.tailscale.port;
-  await $`iptables -A OUTPUT -p udp --dport ${tsPort} -j ACCEPT`;
-  if (tsPort !== config.tailscale.port) {
-    await $`iptables -A OUTPUT -p udp --dport ${config.tailscale.port} -j ACCEPT`;
-  }
+  await $`iptables -A OUTPUT -p udp --dport ${config.tailscale.port} -j ACCEPT`;
   await $`iptables -A OUTPUT -p udp --dport 3478 -j ACCEPT`;
   await $`iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT`;
 
   // Allow incoming Tailscale connections
-  await $`iptables -A INPUT -p udp --dport ${tsPort} -j ACCEPT`;
-  if (tsPort !== config.tailscale.port) {
-    await $`iptables -A INPUT -p udp --dport ${config.tailscale.port} -j ACCEPT`;
-  }
+  await $`iptables -A INPUT -p udp --dport ${config.tailscale.port} -j ACCEPT`;
 
   // Allow DNS
   await $`iptables -A OUTPUT -p udp --dport 53 -j ACCEPT`;
@@ -494,13 +460,10 @@ async function applyKillSwitch(config: Config): Promise<void> {
   await $`iptables -A OUTPUT -o eth0 -p udp --dport 443 -j ACCEPT`;
   await $`iptables -A INPUT -i eth0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT`;
 
-  // Allow STUN/data port bypass traffic through eth0
-  if (config.bypass.stun) {
-    await $`iptables -A OUTPUT -o eth0 -p udp --dport 3478 -j ACCEPT`;
-  }
-  if (config.bypass.dataPort) {
-    await $`iptables -A OUTPUT -o eth0 -p udp --sport ${tsPort} -j ACCEPT`;
-    await $`iptables -A INPUT -i eth0 -p udp --dport ${tsPort} -j ACCEPT`;
+  // Allow STUN/data port bypass traffic through eth0 (matched by fwmark)
+  if (config.bypass.stun || config.bypass.dataPort) {
+    await $`iptables -A OUTPUT -o eth0 -p udp -m mark --mark 0x100/0x100 -j ACCEPT`;
+    await $`iptables -A INPUT -i eth0 -p udp -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT`;
   }
 
   // Re-apply NAT after flushing
@@ -528,22 +491,19 @@ async function setupStunBypass(config: Config): Promise<void> {
     return;
   }
 
-  // 2. Policy rule: marked packets use table 100
-  // Remove existing rule first to avoid duplicates
-  await $`ip rule del fwmark 0x100 table 100`.nothrow().quiet();
-  await $`ip rule add fwmark 0x100 table 100 priority 100`;
+  // 2. Policy rule: packets with bit 0x100 set use table 100
+  // Use mask to check only our bit, preserving tailscaled's 0x80000
+  await $`ip rule del fwmark 0x100/0x100 table 100`.nothrow().quiet();
+  await $`ip rule add fwmark 0x100/0x100 table 100 priority 100`;
 
-  // 3. Mark STUN packets (UDP dport 3478)
-  if (config.bypass.stun) {
-    await $`iptables -t mangle -A OUTPUT -p udp --dport 3478 -j MARK --set-mark 0x100`;
-    log("STUN bypass enabled (UDP dport 3478 -> eth0)");
-  }
-
-  // 4. Mark Tailscale data port packets (UDP sport using actual detected port)
-  if (config.bypass.dataPort) {
-    const port = tailscaledActualPort || config.tailscale.port;
-    await $`iptables -t mangle -A OUTPUT -p udp --sport ${port} -j MARK --set-mark 0x100`;
-    log(`Tailscale data port bypass enabled (UDP sport ${port} -> eth0)`);
+  // 3. Mark all UDP packets from tailscaled via its SO_MARK (0x80000).
+  // tailscaled sets fwmark 0x80000 on its sockets for routing loop prevention.
+  // We use --set-xmark to ADD bit 0x100 without clearing 0x80000,
+  // so tailscaled's own routing logic is preserved.
+  // This catches both STUN and data port traffic regardless of port numbers.
+  if (config.bypass.stun || config.bypass.dataPort) {
+    await $`iptables -t mangle -A OUTPUT -p udp -m mark --mark 0x80000/0x80000 -j MARK --set-xmark 0x100/0x100`;
+    log("Tailscale UDP bypass enabled (matching fwmark 0x80000 -> eth0)");
   }
 
   // NOTE: MASQUERADE for marked packets is handled in setupNat(),
@@ -579,9 +539,6 @@ async function activateVpnRouting(config: Config): Promise<void> {
   if (addDefault.exitCode !== 0) {
     await $`ip route replace default dev wg0 metric 10`;
   }
-
-  // Detect tailscaled's actual listening port before setting up bypass rules
-  await detectTailscaledPort(config.tailscale.port);
 
   // Set up STUN/data port bypass after wg0 default route is in place
   await setupStunBypass(config);
