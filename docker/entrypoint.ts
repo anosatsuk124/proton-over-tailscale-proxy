@@ -27,6 +27,10 @@ interface Config {
   killSwitch: boolean;
   healthCheckUrl: string;
   serveFrontend: boolean;
+  bypass: {
+    stun: boolean;      // STUN (UDP 3478) via eth0
+    dataPort: boolean;  // Tailscale data port via eth0
+  };
 }
 
 function stripNewlines(s: string): string {
@@ -57,6 +61,10 @@ function loadConfig(): Config {
     killSwitch: process.env.KILL_SWITCH !== "false",
     healthCheckUrl: process.env.HEALTH_CHECK_URL ?? "https://ipinfo.io",
     serveFrontend: process.env.TAILSCALE_SERVE_FRONTEND !== "false",
+    bypass: {
+      stun: process.env.BYPASS_STUN_VIA_ETH0 !== "false",         // default true
+      dataPort: process.env.BYPASS_TAILSCALE_PORT_VIA_ETH0 !== "false", // default true
+    },
   };
 }
 
@@ -447,10 +455,61 @@ async function applyKillSwitch(config: Config): Promise<void> {
   await $`iptables -A OUTPUT -o eth0 -p udp --dport 443 -j ACCEPT`;
   await $`iptables -A INPUT -i eth0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT`;
 
+  // Allow STUN/data port bypass traffic through eth0
+  if (config.bypass.stun) {
+    await $`iptables -A OUTPUT -o eth0 -p udp --dport 3478 -j ACCEPT`;
+  }
+  if (config.bypass.dataPort) {
+    await $`iptables -A OUTPUT -o eth0 -p udp --sport ${config.tailscale.port} -j ACCEPT`;
+    await $`iptables -A INPUT -i eth0 -p udp --dport ${config.tailscale.port} -j ACCEPT`;
+  }
+
   // Re-apply NAT after flushing
   await setupNat();
 
   log("Kill switch applied");
+}
+
+// --- STUN/Data Port Bypass ---
+
+async function setupStunBypass(config: Config): Promise<void> {
+  if (!config.bypass.stun && !config.bypass.dataPort) {
+    log("STUN/data port bypass disabled");
+    return;
+  }
+
+  log("Setting up STUN/data port bypass via eth0...");
+
+  // 1. Add eth0 default route to routing table 100
+  const addTable = await $`ip route replace default via ${gateway} dev eth0 table 100`
+    .nothrow()
+    .quiet();
+  if (addTable.exitCode !== 0) {
+    log("WARNING: Failed to add route to table 100");
+    return;
+  }
+
+  // 2. Policy rule: marked packets use table 100
+  // Remove existing rule first to avoid duplicates
+  await $`ip rule del fwmark 0x100 table 100`.nothrow().quiet();
+  await $`ip rule add fwmark 0x100 table 100 priority 100`;
+
+  // 3. Mark STUN packets (UDP dport 3478)
+  if (config.bypass.stun) {
+    await $`iptables -t mangle -A OUTPUT -p udp --dport 3478 -j MARK --set-mark 0x100`;
+    log("STUN bypass enabled (UDP dport 3478 -> eth0)");
+  }
+
+  // 4. Mark Tailscale data port packets (UDP sport)
+  if (config.bypass.dataPort) {
+    await $`iptables -t mangle -A OUTPUT -p udp --sport ${config.tailscale.port} -j MARK --set-mark 0x100`;
+    log(`Tailscale data port bypass enabled (UDP sport ${config.tailscale.port} -> eth0)`);
+  }
+
+  // 5. MASQUERADE for marked packets going out eth0
+  await $`iptables -t nat -A POSTROUTING -o eth0 -m mark --mark 0x100 -j MASQUERADE`;
+
+  log("STUN/data port bypass configured");
 }
 
 // --- VPN Routing ---
@@ -480,6 +539,9 @@ async function activateVpnRouting(config: Config): Promise<void> {
   if (addDefault.exitCode !== 0) {
     await $`ip route replace default dev wg0 metric 10`;
   }
+
+  // Set up STUN/data port bypass after wg0 default route is in place
+  await setupStunBypass(config);
 
   log("VPN routing activated - traffic now flows through ProtonVPN");
 }

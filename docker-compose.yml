@@ -48,6 +48,10 @@ services:
       - KILL_SWITCH=${KILL_SWITCH:-true}
       - HEALTH_CHECK_URL=${HEALTH_CHECK_URL:-https://ipinfo.io}
 
+      # STUN/Data port bypass (route via eth0 instead of VPN for direct connections)
+      - BYPASS_STUN_VIA_ETH0=${BYPASS_STUN_VIA_ETH0:-true}
+      - BYPASS_TAILSCALE_PORT_VIA_ETH0=${BYPASS_TAILSCALE_PORT_VIA_ETH0:-true}
+
       # Tailscale Serve (expose frontend via HTTPS 443)
       - TAILSCALE_SERVE_FRONTEND=${TAILSCALE_SERVE_FRONTEND:-true}
 
