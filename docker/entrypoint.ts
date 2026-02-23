@@ -106,6 +106,8 @@ function error(msg: string): never {
 
 // Cached eth0 gateway address, detected once at startup
 let gateway = "";
+// Actual UDP port tailscaled binds to (detected at runtime)
+let tailscaledActualPort = 0;
 
 async function detectAndCacheGateway(): Promise<string> {
   const routeOutput = await $`ip route show dev eth0`.nothrow().quiet();
@@ -126,6 +128,30 @@ async function detectAndCacheGateway(): Promise<string> {
     }
   }
   error("Could not detect eth0 gateway. Check Docker network configuration.");
+}
+
+async function detectTailscaledPort(configPort: number): Promise<number> {
+  // Detect the actual UDP port tailscaled is listening on,
+  // since it may differ from the configured --port value
+  const ss = await $`ss -ulnp`.nothrow().quiet();
+  if (ss.exitCode === 0) {
+    for (const line of ss.text().split("\n")) {
+      if (line.includes("tailscaled")) {
+        const match = line.match(/0\.0\.0\.0:(\d+)/);
+        if (match) {
+          const port = parseInt(match[1], 10);
+          if (port !== configPort) {
+            log(`WARNING: tailscaled bound to port ${port} instead of configured ${configPort}`);
+          }
+          tailscaledActualPort = port;
+          return port;
+        }
+      }
+    }
+  }
+  log(`Could not detect tailscaled port, using configured port ${configPort}`);
+  tailscaledActualPort = configPort;
+  return configPort;
 }
 
 // --- DNS ---
@@ -422,12 +448,20 @@ async function applyKillSwitch(config: Config): Promise<void> {
   await $`iptables -A OUTPUT -p udp --dport 51820 -j ACCEPT`;
 
   // Allow Tailscale traffic (UDP and TCP for DERP relays)
-  await $`iptables -A OUTPUT -p udp --dport ${config.tailscale.port} -j ACCEPT`;
+  // Use both configured and actual port in case they differ
+  const tsPort = tailscaledActualPort || config.tailscale.port;
+  await $`iptables -A OUTPUT -p udp --dport ${tsPort} -j ACCEPT`;
+  if (tsPort !== config.tailscale.port) {
+    await $`iptables -A OUTPUT -p udp --dport ${config.tailscale.port} -j ACCEPT`;
+  }
   await $`iptables -A OUTPUT -p udp --dport 3478 -j ACCEPT`;
   await $`iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT`;
 
   // Allow incoming Tailscale connections
-  await $`iptables -A INPUT -p udp --dport ${config.tailscale.port} -j ACCEPT`;
+  await $`iptables -A INPUT -p udp --dport ${tsPort} -j ACCEPT`;
+  if (tsPort !== config.tailscale.port) {
+    await $`iptables -A INPUT -p udp --dport ${config.tailscale.port} -j ACCEPT`;
+  }
 
   // Allow DNS
   await $`iptables -A OUTPUT -p udp --dport 53 -j ACCEPT`;
@@ -465,8 +499,8 @@ async function applyKillSwitch(config: Config): Promise<void> {
     await $`iptables -A OUTPUT -o eth0 -p udp --dport 3478 -j ACCEPT`;
   }
   if (config.bypass.dataPort) {
-    await $`iptables -A OUTPUT -o eth0 -p udp --sport ${config.tailscale.port} -j ACCEPT`;
-    await $`iptables -A INPUT -i eth0 -p udp --dport ${config.tailscale.port} -j ACCEPT`;
+    await $`iptables -A OUTPUT -o eth0 -p udp --sport ${tsPort} -j ACCEPT`;
+    await $`iptables -A INPUT -i eth0 -p udp --dport ${tsPort} -j ACCEPT`;
   }
 
   // Re-apply NAT after flushing
@@ -505,10 +539,11 @@ async function setupStunBypass(config: Config): Promise<void> {
     log("STUN bypass enabled (UDP dport 3478 -> eth0)");
   }
 
-  // 4. Mark Tailscale data port packets (UDP sport)
+  // 4. Mark Tailscale data port packets (UDP sport using actual detected port)
   if (config.bypass.dataPort) {
-    await $`iptables -t mangle -A OUTPUT -p udp --sport ${config.tailscale.port} -j MARK --set-mark 0x100`;
-    log(`Tailscale data port bypass enabled (UDP sport ${config.tailscale.port} -> eth0)`);
+    const port = tailscaledActualPort || config.tailscale.port;
+    await $`iptables -t mangle -A OUTPUT -p udp --sport ${port} -j MARK --set-mark 0x100`;
+    log(`Tailscale data port bypass enabled (UDP sport ${port} -> eth0)`);
   }
 
   // NOTE: MASQUERADE for marked packets is handled in setupNat(),
@@ -544,6 +579,9 @@ async function activateVpnRouting(config: Config): Promise<void> {
   if (addDefault.exitCode !== 0) {
     await $`ip route replace default dev wg0 metric 10`;
   }
+
+  // Detect tailscaled's actual listening port before setting up bypass rules
+  await detectTailscaledPort(config.tailscale.port);
 
   // Set up STUN/data port bypass after wg0 default route is in place
   await setupStunBypass(config);
