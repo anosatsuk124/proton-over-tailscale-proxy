@@ -417,12 +417,12 @@ async function applyKillSwitch(config: Config): Promise<void> {
   await $`iptables -A OUTPUT -p udp --dport 51820 -j ACCEPT`;
 
   // Allow Tailscale traffic (UDP and TCP for DERP relays)
-  await $`iptables -A OUTPUT -p udp --dport 41641 -j ACCEPT`;
+  await $`iptables -A OUTPUT -p udp --dport ${config.tailscale.port} -j ACCEPT`;
   await $`iptables -A OUTPUT -p udp --dport 3478 -j ACCEPT`;
   await $`iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT`;
 
   // Allow incoming Tailscale connections
-  await $`iptables -A INPUT -p udp --dport 41641 -j ACCEPT`;
+  await $`iptables -A INPUT -p udp --dport ${config.tailscale.port} -j ACCEPT`;
 
   // Allow DNS
   await $`iptables -A OUTPUT -p udp --dport 53 -j ACCEPT`;
