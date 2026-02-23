@@ -131,6 +131,43 @@ async function resolveHost(host: string): Promise<string | null> {
   return null;
 }
 
+async function resolveAllIps(host: string): Promise<string[]> {
+  // Return all IPv4 addresses for a hostname (CDN hosts rotate IPs)
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+    return [host];
+  }
+
+  const ips = new Set<string>();
+
+  // Try getent ahostsv4 — returns all A records
+  const getent = await $`getent ahostsv4 ${host} 2>/dev/null`
+    .nothrow()
+    .quiet();
+  if (getent.exitCode === 0) {
+    for (const line of getent.text().split("\n")) {
+      const ip = line.split(/\s+/)[0];
+      if (ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
+        ips.add(ip);
+      }
+    }
+  }
+
+  // Fallback: dig +short returns multiple lines
+  if (ips.size === 0) {
+    const dig = await $`dig +short ${host} 2>/dev/null`.nothrow().quiet();
+    if (dig.exitCode === 0) {
+      for (const line of dig.text().split("\n")) {
+        const trimmed = line.trim();
+        if (/^\d+\.\d+\.\d+\.\d+$/.test(trimmed)) {
+          ips.add(trimmed);
+        }
+      }
+    }
+  }
+
+  return [...ips];
+}
+
 // --- WireGuard ---
 
 async function setupWireguard(config: Config): Promise<void> {
@@ -392,65 +429,13 @@ async function applyKillSwitch(config: Config): Promise<void> {
 async function activateVpnRouting(config: Config): Promise<void> {
   log("Activating VPN routing...");
 
-  // Add routes for Tailscale control plane through eth0 (bypass ProtonVPN)
-  const tsHosts = [
-    "controlplane.tailscale.com",
-    "log.tailscale.io",
-    "login.tailscale.com",
-  ];
+  // Add bypass routes for Tailscale control plane and DERP servers through eth0
+  log("Setting up bypass routes for Tailscale infrastructure...");
+  await refreshBypassRoutes();
 
-  for (const host of tsHosts) {
-    const ip = await resolveHost(host);
-    if (ip) {
-      log(`Adding bypass route for ${host} (${ip}) through eth0`);
-      const add =
-        await $`ip route add ${ip}/32 via 172.20.0.1 dev eth0`
-          .nothrow()
-          .quiet();
-      if (add.exitCode !== 0) {
-        await $`ip route replace ${ip}/32 via 172.20.0.1 dev eth0`
-          .nothrow()
-          .quiet();
-      }
-    } else {
-      log(`WARNING: Could not resolve ${host}`);
-    }
-  }
-
-  // Add bypass routes for all Tailscale DERP relay servers
-  log("Adding bypass routes for Tailscale DERP servers...");
-  const derpMapResult = await $`tailscale debug derp-map`.nothrow().quiet();
-
-  if (derpMapResult.exitCode === 0) {
-    const derpText = derpMapResult.text();
-    const derpIps = [
-      ...new Set(
-        [...derpText.matchAll(/"IPv4"\s*:\s*"([0-9.]+)"/g)].map((m) => m[1])
-      ),
-    ];
-
-    if (derpIps.length > 0) {
-      for (const ip of derpIps) {
-        const add =
-          await $`ip route add ${ip}/32 via 172.20.0.1 dev eth0`
-            .nothrow()
-            .quiet();
-        if (add.exitCode !== 0) {
-          await $`ip route replace ${ip}/32 via 172.20.0.1 dev eth0`
-            .nothrow()
-            .quiet();
-        }
-      }
-      log(`Added bypass routes for ${derpIps.length} DERP server IPs`);
-    } else {
-      await addFallbackDerpRoutes();
-    }
-  } else {
-    log(
-      "WARNING: Could not get DERP map, adding known DERP hostnames as fallback"
-    );
-    await addFallbackDerpRoutes();
-  }
+  // Disable IPv6 on wg0 to prevent log floods from broken ::/0 routing
+  await $`sysctl -w net.ipv6.conf.wg0.disable_ipv6=1`.nothrow().quiet();
+  log("Disabled IPv6 on wg0");
 
   // Replace default route: wg0 gets priority, eth0 becomes fallback
   log("Setting default route through WireGuard...");
@@ -481,18 +466,82 @@ async function activateVpnRouting(config: Config): Promise<void> {
 
 async function addFallbackDerpRoutes(): Promise<void> {
   for (let i = 1; i <= 29; i++) {
-    const derpIp = await resolveHost(`derp${i}.tailscale.com`);
-    if (derpIp) {
-      const add =
-        await $`ip route add ${derpIp}/32 via 172.20.0.1 dev eth0`
-          .nothrow()
-          .quiet();
-      if (add.exitCode !== 0) {
-        await $`ip route replace ${derpIp}/32 via 172.20.0.1 dev eth0`
+    const ips = await resolveAllIps(`derp${i}.tailscale.com`);
+    for (const ip of ips) {
+      await $`ip route replace ${ip}/32 via 172.20.0.1 dev eth0`
+        .nothrow()
+        .quiet();
+    }
+  }
+}
+
+async function refreshBypassRoutes(): Promise<void> {
+  // Refresh control plane bypass routes
+  const tsHosts = [
+    "controlplane.tailscale.com",
+    "log.tailscale.io",
+    "log.tailscale.com",
+    "login.tailscale.com",
+    // Let's Encrypt ACME servers (needed for tailscale serve TLS certs)
+    "acme-v02.api.letsencrypt.org",
+    "r11.o.lencr.org",
+    "r10.o.lencr.org",
+  ];
+
+  for (const host of tsHosts) {
+    const ips = await resolveAllIps(host);
+    for (const ip of ips) {
+      await $`ip route replace ${ip}/32 via 172.20.0.1 dev eth0`
+        .nothrow()
+        .quiet();
+    }
+    if (ips.length > 1) {
+      log(`Bypassed ${ips.length} IPs for ${host}`);
+    }
+  }
+
+  // Refresh DERP relay bypass routes from live DERP map
+  const derpMapResult = await $`tailscale debug derp-map`.nothrow().quiet();
+
+  if (derpMapResult.exitCode === 0) {
+    const derpText = derpMapResult.text();
+    // Extract both IPv4 addresses and hostnames as safety net
+    const derpIps = [
+      ...new Set(
+        [...derpText.matchAll(/"IPv4"\s*:\s*"([0-9.]+)"/g)].map((m) => m[1])
+      ),
+    ];
+
+    const derpHostnames = [
+      ...new Set(
+        [...derpText.matchAll(/"HostName"\s*:\s*"([^"]+)"/g)].map((m) => m[1])
+      ),
+    ];
+
+    // Resolve hostnames to IPs as additional safety net
+    for (const hostname of derpHostnames) {
+      const ips = await resolveAllIps(hostname);
+      for (const ip of ips) {
+        if (!derpIps.includes(ip)) {
+          derpIps.push(ip);
+        }
+      }
+    }
+
+    if (derpIps.length > 0) {
+      for (const ip of derpIps) {
+        await $`ip route replace ${ip}/32 via 172.20.0.1 dev eth0`
           .nothrow()
           .quiet();
       }
+      log(`Refreshed bypass routes for ${derpIps.length} DERP server IPs`);
+    } else {
+      log("No DERP IPs found in map, using fallback hostnames");
+      await addFallbackDerpRoutes();
     }
+  } else {
+    log("WARNING: Could not get DERP map, using fallback DERP hostnames");
+    await addFallbackDerpRoutes();
   }
 }
 
@@ -652,20 +701,85 @@ async function healthcheck(config: Config): Promise<boolean> {
 
 // --- Service Monitor ---
 
+async function checkTailscaleConnectivity(): Promise<boolean> {
+  const status = await $`tailscale status --json`.nothrow().quiet();
+  if (status.exitCode !== 0) return false;
+  try {
+    const json = JSON.parse(status.text());
+    return json.Self?.Online === true;
+  } catch {
+    return false;
+  }
+}
+
 async function monitorServices(config: Config): Promise<never> {
+  let consecutiveFailures = 0;
+  let tickCount = 0;
+  let serveConfigured = false;
+  const ROUTE_REFRESH_INTERVAL = 10; // Every 10 ticks (30s * 10 = 5 min)
+
   while (true) {
-    // Check WireGuard
+    tickCount++;
+
+    // Defer tailscale serve until nginx (localhost:80) is actually responding
+    if (!serveConfigured && config.serveFrontend) {
+      const curlCheck =
+        await $`curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://localhost:80`
+          .nothrow()
+          .quiet();
+      if (curlCheck.exitCode === 0 && curlCheck.text().trim() !== "000") {
+        log("nginx is responding on localhost:80, configuring tailscale serve...");
+        await setupTailscaleServe(config);
+        serveConfigured = true;
+      }
+    }
+
+    // Check WireGuard interface
     const wgCheck = await $`ip link show wg0`.nothrow().quiet();
     if (wgCheck.exitCode !== 0) {
       log("WireGuard interface down, attempting to restart...");
       await startWireguard(config);
     }
 
-    // Check Tailscale
-    const tsCheck = await $`pgrep tailscaled`.nothrow().quiet();
-    if (tsCheck.exitCode !== 0) {
-      log("Tailscale daemon down, attempting to restart...");
-      await startTailscale(config);
+    // Check Tailscale connectivity (not just process alive)
+    const online = await checkTailscaleConnectivity();
+
+    if (online) {
+      if (consecutiveFailures > 0) {
+        log("Tailscale connectivity restored");
+      }
+      consecutiveFailures = 0;
+
+      // Periodic bypass route refresh every 5 minutes
+      if (tickCount % ROUTE_REFRESH_INTERVAL === 0) {
+        log("Periodic bypass route refresh...");
+        await refreshBypassRoutes();
+      }
+    } else {
+      consecutiveFailures++;
+      log(
+        `Tailscale offline (failure ${consecutiveFailures}/3), refreshing bypass routes...`
+      );
+
+      // First action: refresh routes (most likely fix for DERP IP changes)
+      await refreshBypassRoutes();
+
+      // Wait and re-check
+      await Bun.sleep(10_000);
+      const recovered = await checkTailscaleConnectivity();
+      if (recovered) {
+        log("Tailscale recovered after route refresh");
+        consecutiveFailures = 0;
+      } else if (consecutiveFailures >= 3) {
+        // After 3 consecutive failures (~90s), restart the daemon
+        log(
+          "Tailscale still offline after 3 attempts, restarting daemon..."
+        );
+        await stopTailscale();
+        await Bun.sleep(2_000);
+        await startTailscale(config);
+        consecutiveFailures = 0;
+      }
     }
 
     await Bun.sleep(30_000);
@@ -684,6 +798,16 @@ async function cleanup(config: Config): Promise<void> {
 
 // --- Main ---
 
+async function startCronService(): Promise<void> {
+  log("Starting cron service for auto-updates...");
+  Bun.spawn(["cron"], {
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  await Bun.sleep(1_000);
+  log("Cron service started");
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
 
@@ -696,6 +820,9 @@ async function main(): Promise<void> {
     const ok = await healthcheck(config);
     process.exit(ok ? 0 : 1);
   }
+
+  // Start cron for auto-updates
+  await startCronService();
 
   log("Starting ProtonVPN + Tailscale Exit Node...");
   log(
@@ -720,8 +847,28 @@ async function main(): Promise<void> {
     // Tailscale is connected - safe to route traffic through ProtonVPN
     await activateVpnRouting(config);
 
-    // Configure tailscale serve for frontend HTTPS access
-    await setupTailscaleServe(config);
+    // Post-routing connectivity check: VPN routing may break Tailscale's
+    // connection to control plane if CDN IPs were missed. Detect early.
+    log("Verifying Tailscale stays online after VPN routing activation...");
+    await Bun.sleep(10_000);
+    const stillOnline = await checkTailscaleConnectivity();
+    if (!stillOnline) {
+      log("WARNING: Tailscale went offline after VPN routing! Refreshing bypass routes...");
+      await refreshBypassRoutes();
+      await Bun.sleep(5_000);
+      const recovered = await checkTailscaleConnectivity();
+      if (!recovered) {
+        log("Tailscale still offline, restarting daemon...");
+        await stopTailscale();
+        await Bun.sleep(2_000);
+        await startTailscale(config);
+        await waitForTailscaleConnection();
+      } else {
+        log("Tailscale recovered after route refresh");
+      }
+    } else {
+      log("Tailscale connectivity confirmed after VPN routing activation");
+    }
 
     if (config.killSwitch) {
       log("Services are ready, applying kill switch...");
