@@ -2,7 +2,7 @@
 # Routes all Tailscale client traffic through ProtonVPN via WireGuard
 # Uses Tailscale userspace networking for container compatibility
 
-FROM alpine:3.19
+FROM oven/bun:1-alpine
 
 LABEL maintainer="ProtonVPN-over-Tailscale"
 LABEL description="Container that routes Tailscale exit node traffic through ProtonVPN via WireGuard"
@@ -11,8 +11,6 @@ LABEL description="Container that routes Tailscale exit node traffic through Pro
 # wireguard-tools: WireGuard configuration and management
 # iproute2, iptables: Network routing and firewall for exit node
 # curl: Health checks and HTTP requests
-# bash: Script execution
-# supervisor: Process management
 # ca-certificates: SSL/TLS certificates
 RUN apk add --no-cache \
     wireguard-tools \
@@ -20,8 +18,6 @@ RUN apk add --no-cache \
     iptables \
     iptables-legacy \
     curl \
-    bash \
-    supervisor \
     ca-certificates \
     && rm -rf /var/cache/apk/*
 
@@ -39,15 +35,10 @@ RUN apk add --no-cache --virtual .build-deps \
     && apk del .build-deps
 
 # Create necessary directories
-RUN mkdir -p /etc/wireguard /var/run/tailscale /etc/supervisor.d /app /var/log /var/lib/tailscale
+RUN mkdir -p /etc/wireguard /var/run/tailscale /app /var/log /var/lib/tailscale
 
-# Copy configuration and scripts
-COPY entrypoint.sh /app/entrypoint.sh
-COPY wireguard-setup.sh /app/wireguard-setup.sh
-COPY supervisord.conf /etc/supervisord.conf
-
-# Make scripts executable
-RUN chmod +x /app/entrypoint.sh /app/wireguard-setup.sh
+# Copy entrypoint script
+COPY entrypoint.ts /app/entrypoint.ts
 
 # Expose Tailscale port only (no proxy ports needed for exit node)
 # 41641/udp - Tailscale wireguard port
@@ -58,8 +49,6 @@ EXPOSE 41641/udp
 
 # Health check - verify VPN and Tailscale are operational
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD /app/entrypoint.sh healthcheck || exit 1
+    CMD bun run /app/entrypoint.ts healthcheck || exit 1
 
-# Use supervisor to manage multiple processes
-ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["supervisord", "-c", "/etc/supervisord.conf"]
+ENTRYPOINT ["bun", "run", "/app/entrypoint.ts"]
