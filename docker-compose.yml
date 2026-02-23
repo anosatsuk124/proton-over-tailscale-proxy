@@ -6,7 +6,6 @@ services:
     build:
       context: ./docker
       dockerfile: Dockerfile
-    container_name: proton-tailscale-exit-node
     restart: unless-stopped
 
     # Required capabilities for VPN and networking
@@ -79,7 +78,6 @@ services:
     build:
       context: ./rust-backend
       dockerfile: Dockerfile
-    container_name: proton-tailscale-api
     restart: unless-stopped
 
     environment:
@@ -121,7 +119,6 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: proton-tailscale-frontend
     restart: unless-stopped
 
     environment:
