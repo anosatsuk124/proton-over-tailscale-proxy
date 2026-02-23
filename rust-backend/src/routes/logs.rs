@@ -83,7 +83,7 @@ pub async fn get_logs(
     State(state): State<Arc<AppState>>,
     Query(query): Query<LogsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let container = query.container.unwrap_or_else(|| crate::services::docker::CONTAINER_NAME.to_string());
+    let container = query.container.unwrap_or_else(|| state.docker.container_name().to_string());
     let lines = query.limit.or(query.lines).unwrap_or(100);
 
     info!("Fetching logs for container: {}, lines: {}", container, lines);
@@ -104,7 +104,7 @@ pub async fn stream_logs(
     State(state): State<Arc<AppState>>,
     Query(query): Query<LogsQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, ApiError>>> {
-    let container = query.container.unwrap_or_else(|| crate::services::docker::CONTAINER_NAME.to_string());
+    let container = query.container.unwrap_or_else(|| state.docker.container_name().to_string());
 
     info!("Starting log stream for container: {}", container);
 

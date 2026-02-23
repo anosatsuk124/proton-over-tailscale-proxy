@@ -13,25 +13,89 @@ use crate::error::ApiError;
 use crate::routes::connection::ConnectRequest;
 
 /// Base URL for the internal API server running inside the container
-const CONTAINER_API_BASE: &str = "http://proton-tailscale-exit-node:8081";
+/// Since rust-backend shares the network namespace (network_mode: service:proton-tailscale-exit),
+/// the internal API is accessible via localhost.
+const CONTAINER_API_BASE: &str = "http://localhost:8081";
 
 /// URL used to detect public IP address from inside the container
 const PUBLIC_IP_CHECK_URL: &str = "https://ifconfig.me/ip";
-/// Container name for the combined ProtonVPN + Tailscale service
-pub const CONTAINER_NAME: &str = "proton-tailscale-exit-node";
+
+/// Docker Compose label used to find the exit node container.
+const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+const COMPOSE_SERVICE_NAME: &str = "proton-tailscale-exit";
 
 pub struct DockerService {
     docker: Docker,
+    container_name: String,
 }
 
 impl DockerService {
     pub async fn new() -> Result<Arc<Self>, ApiError> {
         let docker = Docker::connect_with_defaults()
             .map_err(|e| ApiError::Docker(format!("Failed to connect to Docker: {}", e)))?;
-        
-        info!("Connected to Docker daemon");
-        
-        Ok(Arc::new(Self { docker }))
+
+        let mut service = Self {
+            docker,
+            container_name: String::new(),
+        };
+
+        // Resolve actual container name from Docker Compose labels
+        let resolved = service.resolve_container_name().await?;
+        service.container_name = resolved;
+        info!("Connected to Docker daemon, exit node container: {}", service.container_name);
+
+        Ok(Arc::new(service))
+    }
+
+    /// Resolve the actual container name by searching for the Docker Compose service label.
+    async fn resolve_container_name(&self) -> Result<String, ApiError> {
+        // Check environment variable override first
+        if let Ok(name) = std::env::var("EXIT_NODE_CONTAINER_NAME") {
+            info!("Using container name from EXIT_NODE_CONTAINER_NAME: {}", name);
+            return Ok(name);
+        }
+
+        // Search by Docker Compose service label
+        let mut filters = std::collections::HashMap::new();
+        filters.insert(
+            "label".to_string(),
+            vec![format!("{}={}", COMPOSE_SERVICE_LABEL, COMPOSE_SERVICE_NAME)],
+        );
+
+        let options = Some(ListContainersOptions {
+            all: true,
+            filters,
+            ..Default::default()
+        });
+
+        let containers = self
+            .docker
+            .list_containers(options)
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to list containers: {}", e)))?;
+
+        if let Some(container) = containers.first() {
+            if let Some(names) = &container.names {
+                if let Some(name) = names.first() {
+                    // Docker prefixes container names with "/"
+                    let name = name.trim_start_matches('/').to_string();
+                    info!("Discovered exit node container: {}", name);
+                    return Ok(name);
+                }
+            }
+        }
+
+        // Fallback to the compose service name
+        warn!(
+            "Could not discover container by label, falling back to '{}'",
+            COMPOSE_SERVICE_NAME
+        );
+        Ok(COMPOSE_SERVICE_NAME.to_string())
+    }
+
+    /// Get the resolved container name
+    pub fn container_name(&self) -> &str {
+        &self.container_name
     }
     
     pub async fn get_container_status(
@@ -92,7 +156,7 @@ impl DockerService {
         
         // Start Tailscale container first
         match self.docker
-            .start_container(CONTAINER_NAME, None::<StartContainerOptions<String>>)
+            .start_container(&self.container_name, None::<StartContainerOptions<String>>)
             .await {
             Ok(_) => info!("Tailscale container started"),
             Err(e) => {
@@ -109,7 +173,7 @@ impl DockerService {
         
         // Start ProtonVPN container
         match self.docker
-            .start_container(CONTAINER_NAME, None::<StartContainerOptions<String>>)
+            .start_container(&self.container_name, None::<StartContainerOptions<String>>)
             .await {
             Ok(_) => info!("ProtonVPN container started"),
             Err(e) => {
@@ -132,7 +196,7 @@ impl DockerService {
         // Stop ProtonVPN first
         match self
             .docker
-            .stop_container(CONTAINER_NAME, None::<StopContainerOptions>)
+            .stop_container(&self.container_name, None::<StopContainerOptions>)
             .await
         {
             Ok(_) => info!("ProtonVPN container stopped"),
@@ -149,7 +213,7 @@ impl DockerService {
         // Stop Tailscale
         match self
             .docker
-            .stop_container(CONTAINER_NAME, None::<StopContainerOptions>)
+            .stop_container(&self.container_name, None::<StopContainerOptions>)
             .await
         {
             Ok(_) => info!("Tailscale container stopped"),
@@ -170,7 +234,7 @@ impl DockerService {
         let exec = self
             .docker
             .create_exec(
-                CONTAINER_NAME,
+                &self.container_name,
                 CreateExecOptions {
                     cmd: Some(vec!["tailscale", "status", "--json"]),
                     attach_stdout: Some(true),
@@ -223,7 +287,7 @@ impl DockerService {
         let exec = self
             .docker
             .create_exec(
-                CONTAINER_NAME,
+                &self.container_name,
                 CreateExecOptions {
                     cmd: Some(vec!["wget", "-qO-", "--timeout=5", PUBLIC_IP_CHECK_URL]),
                     attach_stdout: Some(true),
@@ -264,7 +328,7 @@ impl DockerService {
         let exec = self
             .docker
             .create_exec(
-                CONTAINER_NAME,
+                &self.container_name,
                 CreateExecOptions {
                     cmd: Some(vec!["tailscale", "status", "--json"]),
                     attach_stdout: Some(true),
@@ -409,14 +473,14 @@ impl DockerService {
 
     /// Restart the VPN container
     pub async fn restart_container(&self) -> Result<(), ApiError> {
-        info!("Restarting container: {}", CONTAINER_NAME);
+        info!("Restarting container: {}", &self.container_name);
 
         self.docker
-            .restart_container(CONTAINER_NAME, None)
+            .restart_container(&self.container_name, None)
             .await
             .map_err(|e| ApiError::Docker(format!("Failed to restart container: {}", e)))?;
 
-        info!("Container restarted: {}", CONTAINER_NAME);
+        info!("Container restarted: {}", &self.container_name);
         Ok(())
     }
 
@@ -440,7 +504,7 @@ impl DockerService {
         // Start Tailscale container first
         match self
             .docker
-            .start_container(CONTAINER_NAME, None::<StartContainerOptions<String>>)
+            .start_container(&self.container_name, None::<StartContainerOptions<String>>)
             .await
         {
             Ok(_) => info!("Tailscale container started"),
@@ -467,7 +531,7 @@ impl DockerService {
         // Start ProtonVPN container
         match self
             .docker
-            .start_container(CONTAINER_NAME, None::<StartContainerOptions<String>>)
+            .start_container(&self.container_name, None::<StartContainerOptions<String>>)
             .await
         {
             Ok(_) => info!("ProtonVPN container started"),
@@ -506,7 +570,7 @@ impl DockerService {
     pub async fn get_container_env(&self) -> Result<std::collections::HashMap<String, String>, ApiError> {
         let inspect = self
             .docker
-            .inspect_container(CONTAINER_NAME, None::<InspectContainerOptions>)
+            .inspect_container(&self.container_name, None::<InspectContainerOptions>)
             .await
             .map_err(|e| ApiError::Docker(format!("Failed to inspect container: {}", e)))?;
 

@@ -58,7 +58,7 @@ pub async fn get_config(
     let response = ConfigResponse {
         protonvpn_server: live_server.unwrap_or_else(|| config.vpn.default_server.clone()),
         tailscale_hostname: live_hostname
-            .unwrap_or_else(|| crate::services::docker::CONTAINER_NAME.to_string()),
+            .unwrap_or_else(|| state.docker.container_name().to_string()),
         auto_connect: config.vpn.auto_connect,
         advertise_exit_node: exit_node_status.advertised || config.tailscale.advertise_exit_node,
     };

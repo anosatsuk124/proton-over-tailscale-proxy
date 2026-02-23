@@ -43,7 +43,7 @@ pub async fn get_status(
     info!("Fetching system status");
 
     // Check the combined container (runs both ProtonVPN WireGuard and Tailscale)
-    let container = state.docker.get_container_status(crate::services::docker::CONTAINER_NAME).await.ok();
+    let container = state.docker.get_container_status(state.docker.container_name()).await.ok();
 
     let container_running = container
         .as_ref()
