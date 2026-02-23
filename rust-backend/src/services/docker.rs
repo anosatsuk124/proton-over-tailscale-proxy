@@ -298,8 +298,18 @@ impl DockerService {
             Ok(json) => {
                 // ExitNodeOption means this node offers itself as an exit node
                 let advertised = json["Self"]["ExitNodeOption"].as_bool().unwrap_or(false);
-                let approved = json["Self"]["ExitNode"].as_bool().unwrap_or(false)
-                    || json["Self"]["Online"].as_bool().unwrap_or(false) && advertised;
+                // Check AllowedIPs to determine if the exit node is approved by admin
+                // When approved, AllowedIPs includes "0.0.0.0/0" and "::/0"
+                let allowed_ips = json["Self"]["AllowedIPs"]
+                    .as_array()
+                    .map(|ips| {
+                        ips.iter()
+                            .filter_map(|ip| ip.as_str())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let approved = advertised
+                    && (allowed_ips.contains(&"0.0.0.0/0") || allowed_ips.contains(&"::/0"));
                 let tailscale_ip = json["Self"]["TailscaleIPs"]
                     .as_array()
                     .and_then(|ips| ips.first())
