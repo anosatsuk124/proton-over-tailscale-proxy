@@ -13,7 +13,7 @@ use crate::error::ApiError;
 use crate::routes::connection::ConnectRequest;
 
 /// URL used to detect public IP address from inside the container
-const PUBLIC_IP_CHECK_URL: &str = "https://ifconfig.me";
+const PUBLIC_IP_CHECK_URL: &str = "https://ifconfig.me/ip";
 /// Container name for the combined ProtonVPN + Tailscale service
 pub const CONTAINER_NAME: &str = "proton-tailscale-exit-node";
 
@@ -498,11 +498,11 @@ impl DockerService {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Configure exit node if requested
-        if enable_exit_node {
-            if let Err(e) = self.enable_exit_node().await {
-                warn!("Failed to enable exit node: {}", e);
-                // Continue anyway, VPN will still work without exit node
-            }
+        if enable_exit_node
+            && let Err(e) = self.enable_exit_node().await
+        {
+            warn!("Failed to enable exit node: {}", e);
+            // Continue anyway, VPN will still work without exit node
         }
 
         // Start ProtonVPN container
@@ -541,6 +541,29 @@ impl DockerService {
 
         // Continue with normal stop
         self.stop_vpn().await
+    }
+
+    /// Get environment variables from the running container
+    pub async fn get_container_env(&self) -> Result<std::collections::HashMap<String, String>, ApiError> {
+        let inspect = self
+            .docker
+            .inspect_container(CONTAINER_NAME, None::<InspectContainerOptions>)
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to inspect container: {}", e)))?;
+
+        let mut env_map = std::collections::HashMap::new();
+
+        if let Some(config) = inspect.config
+            && let Some(env_vars) = config.env
+        {
+            for var in env_vars {
+                if let Some((key, value)) = var.split_once('=') {
+                    env_map.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+
+        Ok(env_map)
     }
 }
 
