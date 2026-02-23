@@ -337,6 +337,15 @@ activate_vpn_routing() {
     log "VPN routing activated - traffic now flows through ProtonVPN"
 }
 
+# Configure tailscale serve to expose frontend over HTTPS
+setup_tailscale_serve() {
+    if [[ "${TAILSCALE_SERVE_FRONTEND:-true}" == "true" ]]; then
+        log "Configuring tailscale serve for frontend (HTTPS 443 -> localhost:80)..."
+        tailscale serve --bg --https=443 http://localhost:80
+        log "Frontend is now accessible via Tailscale HTTPS (port 443)"
+    fi
+}
+
 # Stop WireGuard
 stop_wireguard() {
     log "Stopping WireGuard..."
@@ -486,6 +495,9 @@ main() {
     if [[ $attempts -lt $max_attempts ]]; then
         # Tailscale is connected - safe to route traffic through ProtonVPN
         activate_vpn_routing
+
+        # Configure tailscale serve for frontend HTTPS access
+        setup_tailscale_serve
 
         if [[ "$KILL_SWITCH" == "true" ]]; then
             log "Services are ready, applying kill switch..."
