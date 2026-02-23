@@ -94,6 +94,32 @@ function error(msg: string): never {
   process.exit(1);
 }
 
+// --- Gateway Detection ---
+
+// Cached eth0 gateway address, detected once at startup
+let gateway = "";
+
+async function detectAndCacheGateway(): Promise<string> {
+  const routeOutput = await $`ip route show dev eth0`.nothrow().quiet();
+  if (routeOutput.exitCode === 0) {
+    const match = routeOutput.text().match(/default via (\S+)/);
+    if (match) {
+      gateway = match[1];
+      return gateway;
+    }
+  }
+  // Fallback: parse from ip route
+  const defaultRoute = await $`ip route show default`.nothrow().quiet();
+  if (defaultRoute.exitCode === 0) {
+    const match = defaultRoute.text().match(/via (\S+).*dev eth0/);
+    if (match) {
+      gateway = match[1];
+      return gateway;
+    }
+  }
+  error("Could not detect eth0 gateway. Check Docker network configuration.");
+}
+
 // --- DNS ---
 
 async function resolveHost(host: string): Promise<string | null> {
@@ -242,17 +268,18 @@ async function startWireguard(config: Config): Promise<void> {
   // Resolve ProtonVPN endpoint hostname for routing
   const protonHost = config.proton.endpoint.split(":")[0];
   const protonEndpointIp = await resolveHost(protonHost);
+  log(`Using eth0 gateway: ${gateway}`);
 
   if (protonEndpointIp) {
     log(`Resolved ProtonVPN endpoint ${protonHost} -> ${protonEndpointIp}`);
     log(`Adding route to ${protonEndpointIp} through eth0...`);
     const addRoute =
-      await $`ip route add ${protonEndpointIp}/32 via 172.20.0.1 dev eth0`
+      await $`ip route add ${protonEndpointIp}/32 via ${gateway} dev eth0`
         .nothrow()
         .quiet();
     if (addRoute.exitCode !== 0) {
       const replaceRoute =
-        await $`ip route replace ${protonEndpointIp}/32 via 172.20.0.1 dev eth0`
+        await $`ip route replace ${protonEndpointIp}/32 via ${gateway} dev eth0`
           .nothrow()
           .quiet();
       if (replaceRoute.exitCode !== 0) {
@@ -263,12 +290,12 @@ async function startWireguard(config: Config): Promise<void> {
     log(`WARNING: Could not resolve ${protonHost} to an IP address`);
     log("Adding hostname-based route as fallback...");
     const addRoute =
-      await $`ip route add ${protonHost} via 172.20.0.1 dev eth0`
+      await $`ip route add ${protonHost} via ${gateway} dev eth0`
         .nothrow()
         .quiet();
     if (addRoute.exitCode !== 0) {
       const replaceRoute =
-        await $`ip route replace ${protonHost} via 172.20.0.1 dev eth0`
+        await $`ip route replace ${protonHost} via ${gateway} dev eth0`
           .nothrow()
           .quiet();
       if (replaceRoute.exitCode !== 0) {
@@ -440,20 +467,11 @@ async function activateVpnRouting(config: Config): Promise<void> {
   log("Disabled IPv6 on wg0");
 
   // Replace default route: wg0 gets priority, eth0 becomes fallback
-  log("Setting default route through WireGuard...");
-  const routeOutput = await $`ip route`.nothrow().quiet();
-  const routes = routeOutput.text();
-  const defaultMatch = routes.match(
-    /default via (\S+).*eth0/
-  );
-
-  if (defaultMatch) {
-    const eth0Gw = defaultMatch[1];
-    await $`ip route del default via ${eth0Gw} dev eth0`.nothrow().quiet();
-    await $`ip route add default via ${eth0Gw} dev eth0 metric 100`
-      .nothrow()
-      .quiet();
-  }
+  log(`Setting default route through WireGuard (eth0 gateway: ${gateway})...`);
+  await $`ip route del default via ${gateway} dev eth0`.nothrow().quiet();
+  await $`ip route add default via ${gateway} dev eth0 metric 100`
+    .nothrow()
+    .quiet();
 
   // Add wg0 default route with low metric (highest priority)
   const addDefault = await $`ip route add default dev wg0 metric 10`
@@ -470,7 +488,7 @@ async function addFallbackDerpRoutes(): Promise<void> {
   for (let i = 1; i <= 29; i++) {
     const ips = await resolveAllIps(`derp${i}.tailscale.com`);
     for (const ip of ips) {
-      await $`ip route replace ${ip}/32 via 172.20.0.1 dev eth0`
+      await $`ip route replace ${ip}/32 via ${gateway} dev eth0`
         .nothrow()
         .quiet();
     }
@@ -493,7 +511,7 @@ async function refreshBypassRoutes(): Promise<void> {
   for (const host of tsHosts) {
     const ips = await resolveAllIps(host);
     for (const ip of ips) {
-      await $`ip route replace ${ip}/32 via 172.20.0.1 dev eth0`
+      await $`ip route replace ${ip}/32 via ${gateway} dev eth0`
         .nothrow()
         .quiet();
     }
@@ -532,7 +550,7 @@ async function refreshBypassRoutes(): Promise<void> {
 
     if (derpIps.length > 0) {
       for (const ip of derpIps) {
-        await $`ip route replace ${ip}/32 via 172.20.0.1 dev eth0`
+        await $`ip route replace ${ip}/32 via ${gateway} dev eth0`
           .nothrow()
           .quiet();
       }
@@ -890,6 +908,10 @@ async function main(): Promise<void> {
   log(
     "Traffic flow: Tailscale clients -> Tailscale daemon -> WireGuard -> ProtonVPN"
   );
+
+  // Detect and cache eth0 gateway before any network changes
+  await detectAndCacheGateway();
+  log(`Detected eth0 gateway: ${gateway}`);
 
   // Validate and setup
   validateConfig(config);
