@@ -85,18 +85,34 @@ git clone https://github.com/anosatsuk124/proton-over-tailscale-proxy.git
 cd proton-over-tailscale-proxy
 ```
 
-2. 環境変数の設定:
+2. macvlan Dockerネットワークの作成:
+
+コンテナがLAN上で直接IPを持つことで、Docker bridge NATを回避し、UDP hole punching（Tailscaleの直接接続）を可能にします。
+
+```bash
+# サブネット、ゲートウェイ、親インターフェースをLAN環境に合わせて変更してください
+docker network create -d macvlan \
+  --subnet=10.196.1.0/24 \
+  --gateway=10.196.1.1 \
+  -o parent=enp8s0 \
+  vpn_macvlan
+```
+
+> **注意**: ホストマシンからコンテナIPに直接アクセスすることはできません（Docker macvlanの制限）。`docker compose exec` またはTailscale経由でアクセスしてください。
+
+3. 環境変数の設定:
 ```bash
 cp .env.example .env
 # .envを編集して認証情報を設定
+# CONTAINER_IPにLAN上で未使用のIPを設定（例: 10.196.1.200）
 ```
 
-3. Dockerで実行:
+4. Dockerで実行:
 ```bash
 docker compose up -d
 ```
 
-4. Webダッシュボードにアクセス:
+5. Webダッシュボードにアクセス:
 ```
 http://localhost:3000
 ```
@@ -150,6 +166,9 @@ curl https://ipinfo.io
 | `TAILSCALE_ADVERTISE_EXIT_NODE` | 出口ノードとしてアドバタイズ | デフォルト: true |
 | `API_PORT` | APIサーバーポート | デフォルト: 8080 |
 | `FRONTEND_PORT` | フロントエンドポート | デフォルト: 3000 |
+| `MACVLAN_NETWORK_NAME` | 外部macvlan Dockerネットワーク名 | デフォルト: vpn_macvlan |
+| `MACVLAN_GATEWAY` | LANゲートウェイ（DNSとして使用） | ✅ |
+| `CONTAINER_IP` | コンテナの静的LAN IP | ✅ |
 
 詳細な設定オプションは [docs/CONFIGURATION.md](./docs/CONFIGURATION.md) を参照してください。
 

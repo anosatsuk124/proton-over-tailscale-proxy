@@ -550,7 +550,7 @@ async function addFallbackDerpRoutes(): Promise<void> {
   for (let i = 1; i <= 29; i++) {
     const ips = await resolveAllIps(`derp${i}.tailscale.com`);
     for (const ip of ips) {
-      await $`ip route replace ${ip}/32 via ${gateway} dev eth0`
+      await $`ip route replace ${ip}/32 via ${gateway} dev eth0 table 100`
         .nothrow()
         .quiet();
     }
@@ -573,7 +573,7 @@ async function refreshBypassRoutes(): Promise<void> {
   for (const host of tsHosts) {
     const ips = await resolveAllIps(host);
     for (const ip of ips) {
-      await $`ip route replace ${ip}/32 via ${gateway} dev eth0`
+      await $`ip route replace ${ip}/32 via ${gateway} dev eth0 table 100`
         .nothrow()
         .quiet();
     }
@@ -612,7 +612,7 @@ async function refreshBypassRoutes(): Promise<void> {
 
     if (derpIps.length > 0) {
       for (const ip of derpIps) {
-        await $`ip route replace ${ip}/32 via ${gateway} dev eth0`
+        await $`ip route replace ${ip}/32 via ${gateway} dev eth0 table 100`
           .nothrow()
           .quiet();
       }

@@ -85,18 +85,34 @@ git clone https://github.com/anosatsuk124/proton-over-tailscale-proxy.git
 cd proton-over-tailscale-proxy
 ```
 
-2. Configure environment variables:
+2. Create the macvlan Docker network:
+
+The container uses a macvlan network to get a direct LAN IP, bypassing Docker bridge NAT for proper UDP hole punching (direct Tailscale connections).
+
+```bash
+# Adjust subnet, gateway, and parent interface for your LAN
+docker network create -d macvlan \
+  --subnet=10.196.1.0/24 \
+  --gateway=10.196.1.1 \
+  -o parent=enp8s0 \
+  vpn_macvlan
+```
+
+> **Note**: The host machine cannot directly access the container IP (Docker macvlan limitation). Use `docker compose exec` or access via Tailscale instead.
+
+3. Configure environment variables:
 ```bash
 cp .env.example .env
 # Edit .env with your credentials
+# Set CONTAINER_IP to an unused IP on your LAN (e.g., 10.196.1.200)
 ```
 
-3. Run with Docker:
+4. Run with Docker:
 ```bash
 docker compose up -d
 ```
 
-4. Access the web dashboard:
+5. Access the web dashboard:
 ```
 http://localhost:3000
 ```
@@ -150,6 +166,9 @@ curl https://ipinfo.io
 | `TAILSCALE_ADVERTISE_EXIT_NODE` | Advertise as exit node | Default: true |
 | `API_PORT` | API server port | Default: 8080 |
 | `FRONTEND_PORT` | Frontend port | Default: 3000 |
+| `MACVLAN_NETWORK_NAME` | External macvlan Docker network name | Default: vpn_macvlan |
+| `MACVLAN_GATEWAY` | LAN gateway (used as DNS) | ✅ |
+| `CONTAINER_IP` | Static LAN IP for the container | ✅ |
 
 For detailed configuration options, see [docs/CONFIGURATION.md](./docs/CONFIGURATION.md).
 
