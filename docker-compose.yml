@@ -15,6 +15,10 @@ services:
       - SYS_MODULE
       - NET_RAW
 
+    # Required for Tailscale kernel TUN mode
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
     # Required for WireGuard kernel module and IP forwarding
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
@@ -38,7 +42,8 @@ services:
       - TAILSCALE_ADVERTISE_ROUTES=${TAILSCALE_ADVERTISE_ROUTES:-}
       - TAILSCALE_ACCEPT_DNS=${TAILSCALE_ACCEPT_DNS:-false}
       - TAILSCALE_SSH=${TAILSCALE_SSH:-true}
-      - TAILSCALE_USERSPACE_NETWORKING=${TAILSCALE_USERSPACE_NETWORKING:-true}
+      - TAILSCALE_USERSPACE_NETWORKING=${TAILSCALE_USERSPACE_NETWORKING:-false}
+      - TAILSCALE_PORT=${TAILSCALE_PORT:-41641}
 
       # Security settings
       - KILL_SWITCH=${KILL_SWITCH:-true}
@@ -51,7 +56,7 @@ services:
       - tailscale-state:/var/lib/tailscale
 
     ports:
-      - "${TAILSCALE_PORT:-41641}:41641/udp"
+      - "${TAILSCALE_PORT:-41641}:${TAILSCALE_PORT:-41641}/udp"
 
     logging:
       driver: json-file

@@ -22,6 +22,7 @@ interface Config {
     acceptDns: boolean;
     ssh: boolean;
     userspaceNetworking: boolean;
+    port: number;
   };
   killSwitch: boolean;
   healthCheckUrl: string;
@@ -50,7 +51,8 @@ function loadConfig(): Config {
       acceptDns: process.env.TAILSCALE_ACCEPT_DNS === "true",
       ssh: process.env.TAILSCALE_SSH !== "false",
       userspaceNetworking:
-        process.env.TAILSCALE_USERSPACE_NETWORKING !== "false",
+        process.env.TAILSCALE_USERSPACE_NETWORKING === "true",
+      port: parseInt(process.env.TAILSCALE_PORT ?? "41641", 10),
     },
     killSwitch: process.env.KILL_SWITCH !== "false",
     healthCheckUrl: process.env.HEALTH_CHECK_URL ?? "https://ipinfo.io",
@@ -564,6 +566,9 @@ async function startTailscale(config: Config): Promise<void> {
     log("Using kernel TUN mode");
   }
 
+  // Set the port for direct connections (NAT traversal / UDP hole punching)
+  tailscaledArgs.push(`--port=${config.tailscale.port}`);
+
   // Start tailscaled daemon in background
   Bun.spawn(tailscaledArgs, {
     stdout: "inherit",
@@ -796,6 +801,60 @@ async function cleanup(config: Config): Promise<void> {
   process.exit(0);
 }
 
+// --- Internal API Server ---
+
+function startApiServer(): void {
+  log("Starting internal API server on port 8081...");
+
+  Bun.serve({
+    port: 8081,
+    async fetch(req) {
+      const url = new URL(req.url);
+
+      if (req.method === "POST" && url.pathname === "/exit-node/enable") {
+        log("API: Enabling exit node advertisement");
+        const result = await $`tailscale up --advertise-exit-node`.nothrow().quiet();
+        if (result.exitCode !== 0) {
+          const stderr = result.stderr.toString();
+          log(`API: Failed to enable exit node: ${stderr}`);
+          return Response.json({ success: false, error: stderr }, { status: 500 });
+        }
+        log("API: Exit node enabled");
+        return Response.json({ success: true });
+      }
+
+      if (req.method === "POST" && url.pathname === "/exit-node/disable") {
+        log("API: Disabling exit node advertisement");
+        const result = await $`tailscale up --advertise-exit-node=false`.nothrow().quiet();
+        if (result.exitCode !== 0) {
+          const stderr = result.stderr.toString();
+          log(`API: Failed to disable exit node: ${stderr}`);
+          return Response.json({ success: false, error: stderr }, { status: 500 });
+        }
+        log("API: Exit node disabled");
+        return Response.json({ success: true });
+      }
+
+      if (req.method === "GET" && url.pathname === "/status") {
+        const result = await $`tailscale status --json`.nothrow().quiet();
+        if (result.exitCode !== 0) {
+          return Response.json({ success: false, error: "Failed to get status" }, { status: 500 });
+        }
+        try {
+          const status = JSON.parse(result.text());
+          return Response.json({ success: true, data: status });
+        } catch {
+          return Response.json({ success: false, error: "Failed to parse status" }, { status: 500 });
+        }
+      }
+
+      return Response.json({ error: "Not found" }, { status: 404 });
+    },
+  });
+
+  log("Internal API server started on port 8081");
+}
+
 // --- Main ---
 
 async function startCronService(): Promise<void> {
@@ -823,6 +882,9 @@ async function main(): Promise<void> {
 
   // Start cron for auto-updates
   await startCronService();
+
+  // Start internal API server for exit node management
+  startApiServer();
 
   log("Starting ProtonVPN + Tailscale Exit Node...");
   log(
