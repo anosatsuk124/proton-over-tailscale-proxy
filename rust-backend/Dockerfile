@@ -32,6 +32,8 @@ RUN apk add --no-cache \
     ca-certificates \
     curl \
     wget \
+    shadow \
+    su-exec \
     && rm -rf /var/cache/apk/*
 
 # Create app user
@@ -46,8 +48,9 @@ COPY --from=builder /app/target/release/proton-vpn-api /app/proton-vpn-api
 # Set ownership
 RUN chown appuser:appuser /app/proton-vpn-api
 
-# Switch to non-root user
-USER appuser
+# Copy entrypoint script that fixes docker socket permissions
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
 
 # Expose API port
 EXPOSE 8080
@@ -56,5 +59,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -q --spider http://localhost:8080/health || exit 1
 
-# Run the application
-ENTRYPOINT ["/app/proton-vpn-api"]
+# Start as root, entrypoint drops to appuser after fixing permissions
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

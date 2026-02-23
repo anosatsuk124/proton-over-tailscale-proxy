@@ -2,34 +2,76 @@ use axum::{
     extract::State,
     response::{IntoResponse, Json},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::info;
 use crate::{
     error::ApiError,
     models::AppState,
+    routes::status::ApiResponse,
 };
 
-#[derive(Serialize)]
+/// Config response matching frontend's Config interface
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigResponse {
-    pub vpn_enabled: bool,
-    pub tailscale_enabled: bool,
-    pub default_server: String,
-    pub default_protocol: String,
+    pub protonvpn_server: String,
+    pub tailscale_hostname: String,
     pub auto_connect: bool,
+    pub advertise_exit_node: bool,
+}
+
+/// Config update request from frontend
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigUpdateRequest {
+    pub protonvpn_server: Option<String>,
+    pub tailscale_hostname: Option<String>,
+    pub auto_connect: Option<bool>,
+    pub advertise_exit_node: Option<bool>,
 }
 
 pub async fn get_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let config = &state.config;
-    
+
+    // Reflect live exit node state in the config response
+    let exit_node_status = state.get_exit_node_status().await;
+
     let response = ConfigResponse {
-        vpn_enabled: config.vpn.enabled,
-        tailscale_enabled: config.tailscale.enabled,
-        default_server: config.vpn.default_server.clone(),
-        default_protocol: config.vpn.protocol.clone(),
+        protonvpn_server: config.vpn.default_server.clone(),
+        tailscale_hostname: crate::services::docker::CONTAINER_NAME.to_string(),
         auto_connect: config.vpn.auto_connect,
+        advertise_exit_node: exit_node_status.advertised || config.tailscale.advertise_exit_node,
     };
-    
-    Ok(Json(response))
+
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(response),
+        error: None,
+    }))
+}
+
+pub async fn update_config(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<ConfigUpdateRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    info!("Config update request: server={:?}, hostname={:?}", request.protonvpn_server, request.tailscale_hostname);
+
+    // For now, return the current config (config updates would require restart)
+    let config = &_state.config;
+
+    let response = ConfigResponse {
+        protonvpn_server: request.protonvpn_server.unwrap_or_else(|| config.vpn.default_server.clone()),
+        tailscale_hostname: request.tailscale_hostname.unwrap_or_else(|| config.tailscale.container_name.clone()),
+        auto_connect: request.auto_connect.unwrap_or(config.vpn.auto_connect),
+        advertise_exit_node: request.advertise_exit_node.unwrap_or(config.tailscale.advertise_exit_node),
+    };
+
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(response),
+        error: None,
+    }))
 }

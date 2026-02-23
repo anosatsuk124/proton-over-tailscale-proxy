@@ -65,11 +65,13 @@ impl App {
             .route("/disconnect", post(routes::connection::disconnect))
             // Exit node control
             .route("/exit-node", post(routes::connection::toggle_exit_node))
+            // Action endpoint (frontend uses this)
+            .route("/action", post(routes::action::execute_action))
             // Logs
             .route("/logs", get(routes::logs::get_logs))
             .route("/logs/stream", get(routes::logs::stream_logs))
-            // Configuration
-            .route("/config", get(routes::config::get_config))
+            // Configuration (GET + POST)
+            .route("/config", get(routes::config::get_config).post(routes::config::update_config))
             // State
             .with_state(self.state.clone())
             // Middleware

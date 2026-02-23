@@ -121,6 +121,57 @@ main {
   color: black;
 }
 
+.status-excellent {
+  background-color: var(--success-color);
+  color: white;
+}
+
+.status-good {
+  background-color: #66bb6a;
+  color: white;
+}
+
+.status-fair {
+  background-color: var(--warning-color);
+  color: black;
+}
+
+.status-poor {
+  background-color: var(--error-color);
+  color: white;
+}
+
+/* Connected Clients */
+.clients-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.client-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  background-color: var(--accent-color);
+  border-radius: var(--border-radius);
+  font-size: 0.875rem;
+}
+
+.client-name {
+  font-weight: 600;
+}
+
+.client-ip {
+  font-family: monospace;
+  color: var(--text-color);
+}
+
+.client-time {
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
 .loading {
   opacity: 0.7;
   font-style: italic;
@@ -132,6 +183,21 @@ main {
   background-color: rgba(244, 67, 54, 0.1);
   border-radius: var(--border-radius);
   border: 1px solid var(--error-color);
+}
+
+/* Control Group Styles */
+.control-group {
+  margin-bottom: 1rem;
+}
+
+.control-group h3 {
+  color: var(--text-color);
+  font-size: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.control-group:last-child {
+  margin-bottom: 0;
 }
 
 /* Button Styles */
@@ -183,6 +249,11 @@ main {
   color: var(--text-secondary);
 }
 
+.btn-approve {
+  background-color: var(--warning-color);
+  color: black;
+}
+
 /* Log Viewer Styles */
 .log-container {
   background-color: #0d1117;
@@ -219,6 +290,23 @@ main {
 
 .log-level-warn {
   color: #d29922;
+}
+
+.log-entry-exit-node {
+  background-color: rgba(233, 69, 96, 0.08);
+  border-left: 3px solid var(--text-color);
+  padding-left: 0.5rem;
+}
+
+.log-badge {
+  background-color: var(--text-color);
+  color: white;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: bold;
+  margin-left: 0.25rem;
+  margin-right: 0.25rem;
 }
 
 .log-controls {

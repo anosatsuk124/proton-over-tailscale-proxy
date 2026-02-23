@@ -12,6 +12,11 @@ use tracing::{debug, error, info, warn};
 use crate::error::ApiError;
 use crate::routes::connection::ConnectRequest;
 
+/// URL used to detect public IP address from inside the container
+const PUBLIC_IP_CHECK_URL: &str = "https://ifconfig.me";
+/// Container name for the combined ProtonVPN + Tailscale service
+pub const CONTAINER_NAME: &str = "proton-tailscale-exit-node";
+
 pub struct DockerService {
     docker: Docker,
 }
@@ -84,7 +89,7 @@ impl DockerService {
         
         // Start Tailscale container first
         match self.docker
-            .start_container("tailscale", None::<StartContainerOptions<String>>)
+            .start_container(CONTAINER_NAME, None::<StartContainerOptions<String>>)
             .await {
             Ok(_) => info!("Tailscale container started"),
             Err(e) => {
@@ -101,7 +106,7 @@ impl DockerService {
         
         // Start ProtonVPN container
         match self.docker
-            .start_container("proton-vpn", None::<StartContainerOptions<String>>)
+            .start_container(CONTAINER_NAME, None::<StartContainerOptions<String>>)
             .await {
             Ok(_) => info!("ProtonVPN container started"),
             Err(e) => {
@@ -124,7 +129,7 @@ impl DockerService {
         // Stop ProtonVPN first
         match self
             .docker
-            .stop_container("proton-vpn", None::<StopContainerOptions>)
+            .stop_container(CONTAINER_NAME, None::<StopContainerOptions>)
             .await
         {
             Ok(_) => info!("ProtonVPN container stopped"),
@@ -141,7 +146,7 @@ impl DockerService {
         // Stop Tailscale
         match self
             .docker
-            .stop_container("tailscale", None::<StopContainerOptions>)
+            .stop_container(CONTAINER_NAME, None::<StopContainerOptions>)
             .await
         {
             Ok(_) => info!("Tailscale container stopped"),
@@ -162,7 +167,7 @@ impl DockerService {
         let exec = self
             .docker
             .create_exec(
-                "tailscale",
+                CONTAINER_NAME,
                 CreateExecOptions {
                     cmd: Some(vec!["tailscale", "status", "--json"]),
                     attach_stdout: Some(true),
@@ -208,6 +213,47 @@ impl DockerService {
         }
     }
 
+    /// Get the public IP address from inside the container
+    pub async fn get_public_ip(&self) -> Result<Option<String>, ApiError> {
+        debug!("Getting public IP from container");
+
+        let exec = self
+            .docker
+            .create_exec(
+                CONTAINER_NAME,
+                CreateExecOptions {
+                    cmd: Some(vec!["wget", "-qO-", "--timeout=5", PUBLIC_IP_CHECK_URL]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to create exec: {}", e)))?;
+
+        let mut output = String::new();
+        let start_result = self
+            .docker
+            .start_exec(&exec.id, None::<StartExecOptions>)
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to start exec: {}", e)))?;
+
+        if let bollard::exec::StartExecResults::Attached { output: mut stream, .. } = start_result {
+            while let Some(chunk) = stream.next().await {
+                if let Ok(bollard::container::LogOutput::StdOut { message }) = chunk {
+                    output.push_str(&String::from_utf8_lossy(&message));
+                }
+            }
+        }
+
+        let ip = output.trim().to_string();
+        if ip.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(ip))
+        }
+    }
+
     /// Get exit node status from Tailscale
     pub async fn get_exit_node_status(&self) -> Result<ExitNodeInfo, ApiError> {
         debug!("Getting exit node status from Tailscale");
@@ -215,7 +261,7 @@ impl DockerService {
         let exec = self
             .docker
             .create_exec(
-                "tailscale",
+                CONTAINER_NAME,
                 CreateExecOptions {
                     cmd: Some(vec!["tailscale", "status", "--json"]),
                     attach_stdout: Some(true),
@@ -250,34 +296,45 @@ impl DockerService {
 
         match serde_json::from_str::<serde_json::Value>(&output) {
             Ok(json) => {
-                let advertised = json["Self"]["ExitNode"].as_bool().unwrap_or(false);
-                let approved = json["Self"]["ExitNodeOption"]["Approved"]
-                    .as_bool()
-                    .unwrap_or(false);
+                // ExitNodeOption means this node offers itself as an exit node
+                let advertised = json["Self"]["ExitNodeOption"].as_bool().unwrap_or(false);
+                let approved = json["Self"]["ExitNode"].as_bool().unwrap_or(false)
+                    || json["Self"]["Online"].as_bool().unwrap_or(false) && advertised;
                 let tailscale_ip = json["Self"]["TailscaleIPs"]
                     .as_array()
                     .and_then(|ips| ips.first())
                     .and_then(|ip| ip.as_str())
                     .map(|s| s.to_string());
 
-                // Count connected clients by checking peers that use this as exit node
+                // Peer is an object (map), not an array
                 let connected_clients = json["Peer"]
-                    .as_array()
+                    .as_object()
                     .map(|peers| {
                         peers
-                            .iter()
+                            .values()
                             .filter(|peer| {
+                                // Peer using us as exit node: they have ExitNode set to our key
                                 peer["ExitNode"].as_bool().unwrap_or(false)
                             })
                             .count() as u32
                     })
                     .unwrap_or(0);
 
+                // Get public IP in parallel
+                let protonvpn_ip = match self.get_public_ip().await {
+                    Ok(ip) => ip,
+                    Err(e) => {
+                        warn!("Failed to get public IP: {}", e);
+                        None
+                    }
+                };
+
                 Ok(ExitNodeInfo {
                     advertised,
                     approved,
                     connected_clients,
                     tailscale_ip,
+                    protonvpn_ip,
                 })
             }
             Err(e) => Err(ApiError::Docker(format!(
@@ -295,7 +352,7 @@ impl DockerService {
         let exec = self
             .docker
             .create_exec(
-                "tailscale",
+                CONTAINER_NAME,
                 CreateExecOptions {
                     cmd: Some(vec!["tailscale", "up", "--advertise-exit-node"]),
                     attach_stdout: Some(true),
@@ -361,7 +418,7 @@ impl DockerService {
         let exec = self
             .docker
             .create_exec(
-                "tailscale",
+                CONTAINER_NAME,
                 CreateExecOptions {
                     cmd: Some(vec!["tailscale", "up"]),
                     attach_stdout: Some(true),
@@ -424,7 +481,7 @@ impl DockerService {
         // Start Tailscale container first
         match self
             .docker
-            .start_container("tailscale", None::<StartContainerOptions<String>>)
+            .start_container(CONTAINER_NAME, None::<StartContainerOptions<String>>)
             .await
         {
             Ok(_) => info!("Tailscale container started"),
@@ -451,7 +508,7 @@ impl DockerService {
         // Start ProtonVPN container
         match self
             .docker
-            .start_container("proton-vpn", None::<StartContainerOptions<String>>)
+            .start_container(CONTAINER_NAME, None::<StartContainerOptions<String>>)
             .await
         {
             Ok(_) => info!("ProtonVPN container started"),
@@ -498,4 +555,6 @@ pub struct ExitNodeInfo {
     pub connected_clients: u32,
     /// Tailscale IP address
     pub tailscale_ip: Option<String>,
+    /// ProtonVPN public IP address
+    pub protonvpn_ip: Option<String>,
 }

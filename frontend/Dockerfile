@@ -31,8 +31,8 @@ RUN echo 'server { \
         try_files $uri $uri/ /index.html; \
     } \
     \
-    location /api { \
-        proxy_pass http://rust-backend:8080; \
+    location /api/ { \
+        proxy_pass http://rust-backend:8080/; \
         proxy_http_version 1.1; \
         proxy_set_header Upgrade $http_upgrade; \
         proxy_set_header Connection "upgrade"; \

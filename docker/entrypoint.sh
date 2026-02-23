@@ -129,18 +129,17 @@ EOF
 # Setup NAT and masquerading for exit node traffic
 setup_nat() {
     log "Setting up NAT and masquerading for exit node..."
-    
-    # Flush existing NAT rules
-    iptables -t nat -F 2>/dev/null || true
-    iptables -t nat -X 2>/dev/null || true
-    
+
+    # Only flush POSTROUTING, preserve Docker's internal DNS NAT rules (DOCKER_OUTPUT chain)
+    iptables -t nat -F POSTROUTING 2>/dev/null || true
+
     # Enable masquerading for WireGuard interface
     # This allows Tailscale client traffic to exit through ProtonVPN
     iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
-    
+
     # Also masquerade for tailscale0 interface if it exists
     iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
-    
+
     log "NAT/masquerading configured"
 }
 
@@ -149,9 +148,10 @@ apply_kill_switch() {
     if [[ "$KILL_SWITCH" == "true" ]]; then
         log "Applying kill switch rules..."
         
-        # Flush existing rules
+        # Flush existing filter rules (but NOT nat - Docker's internal DNS uses nat rules)
         iptables -F 2>/dev/null || true
-        iptables -t nat -F 2>/dev/null || true
+        # Only flush user-defined nat chains, preserve Docker's DOCKER_OUTPUT/DOCKER_POSTROUTING
+        iptables -t nat -F POSTROUTING 2>/dev/null || true
         
         # Default drop policy
         iptables -P INPUT DROP
@@ -202,7 +202,13 @@ apply_kill_switch() {
         iptables -A OUTPUT -o tailscale0 -j ACCEPT
         iptables -A FORWARD -i tailscale0 -j ACCEPT
         iptables -A FORWARD -o tailscale0 -j ACCEPT
-        
+
+        # Allow Tailscale control plane bypass routes through eth0
+        # These hosts have explicit routes through eth0 (set by activate_vpn_routing)
+        iptables -A OUTPUT -o eth0 -p tcp --dport 443 -j ACCEPT
+        iptables -A OUTPUT -o eth0 -p udp --dport 443 -j ACCEPT
+        iptables -A INPUT -i eth0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
         # Re-apply NAT after flushing
         setup_nat
         
@@ -213,48 +219,122 @@ apply_kill_switch() {
     fi
 }
 
-# Start WireGuard
+# Resolve a hostname to an IP address
+resolve_host() {
+    local host="$1"
+    local ip=""
+
+    # Check if it's already an IP address
+    if echo "$host" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "$host"
+        return
+    fi
+
+    # Try getent first (most reliable), prefer IPv4
+    ip=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | head -1)
+    if [[ -n "$ip" ]]; then
+        echo "$ip"
+        return
+    fi
+
+    # Fallback to nslookup
+    ip=$(nslookup "$host" 2>/dev/null | awk '/^Address: / {print $2}' | head -1)
+    if [[ -n "$ip" ]]; then
+        echo "$ip"
+        return
+    fi
+
+    # Last resort: dig
+    ip=$(dig +short "$host" 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
+    echo "$ip"
+}
+
+# Start WireGuard (does NOT set default route - that happens after Tailscale connects)
 start_wireguard() {
     log "Starting WireGuard..."
-    
+
     # Create WireGuard interface
     ip link add wg0 type wireguard 2>/dev/null || true
-    
+
     # Configure WireGuard using wg command directly
     # wg setconf doesn't understand Address/DNS fields, so we use wg set instead
     log "Setting WireGuard private key..."
     wg set wg0 private-key <(echo "${PROTON_WG_PRIVATE_KEY}")
-    
+
     log "Adding WireGuard peer..."
     wg set wg0 peer "${PROTON_WG_PUBLIC_KEY}" allowed-ips "${PROTON_WG_ALLOWED_IPS}" endpoint "${PROTON_WG_ENDPOINT}" persistent-keepalive 25
-    
+
     # Bring up interface
     ip link set up wg0
-    
+
     # Add IP address
     log "Adding IP address ${PROTON_WG_ADDRESS} to wg0..."
     ip address add ${PROTON_WG_ADDRESS} dev wg0
-    
-    # Extract ProtonVPN endpoint IP (remove port)
-    local proton_endpoint_ip=$(echo "$PROTON_WG_ENDPOINT" | cut -d':' -f1)
-    log "Adding route to ProtonVPN endpoint ${proton_endpoint_ip} through eth0..."
-    
-    # Add route to ProtonVPN endpoint through eth0 (so WireGuard can reach it)
-    ip route add ${proton_endpoint_ip} via 172.20.0.1 dev eth0 2>/dev/null || \
-        ip route replace ${proton_endpoint_ip} via 172.20.0.1 dev eth0 2>/dev/null || \
-        log "Note: Could not add route to ${proton_endpoint_ip}, WireGuard may use default gateway"
-    
-    # Add route through WireGuard
-    log "Setting default route through WireGuard..."
-    ip route add default dev wg0 2>/dev/null || ip route replace default dev wg0
-    
+
+    # Resolve ProtonVPN endpoint hostname to an actual IP for routing
+    local proton_host=$(echo "$PROTON_WG_ENDPOINT" | cut -d':' -f1)
+    PROTON_ENDPOINT_IP=$(resolve_host "$proton_host")
+
+    if [[ -n "$PROTON_ENDPOINT_IP" ]]; then
+        log "Resolved ProtonVPN endpoint ${proton_host} -> ${PROTON_ENDPOINT_IP}"
+        log "Adding route to ${PROTON_ENDPOINT_IP} through eth0..."
+        ip route add ${PROTON_ENDPOINT_IP}/32 via 172.20.0.1 dev eth0 2>/dev/null || \
+            ip route replace ${PROTON_ENDPOINT_IP}/32 via 172.20.0.1 dev eth0 2>/dev/null || \
+            log "WARNING: Could not add route to ${PROTON_ENDPOINT_IP}"
+    else
+        log "WARNING: Could not resolve ${proton_host} to an IP address"
+        log "Adding hostname-based route as fallback..."
+        ip route add ${proton_host} via 172.20.0.1 dev eth0 2>/dev/null || \
+            ip route replace ${proton_host} via 172.20.0.1 dev eth0 2>/dev/null || \
+            log "WARNING: Could not add route to ${proton_host}"
+    fi
+
+    # NOTE: Default route through wg0 is set later, after Tailscale connects.
+    # This ensures Tailscale can reach its control plane via direct internet during auth.
+
     # Show WireGuard status for debugging
     log "WireGuard status:"
     wg show wg0 | head -5 | while read line; do
         log "  $line"
     done
-    
-    log "WireGuard started successfully"
+
+    log "WireGuard started successfully (default route NOT yet changed)"
+}
+
+# Activate VPN routing: set default route through wg0 and add bypass routes for Tailscale
+activate_vpn_routing() {
+    log "Activating VPN routing..."
+
+    # Add routes for Tailscale control plane through eth0 (bypass ProtonVPN)
+    # This ensures Tailscale can maintain its connection after default route changes
+    local ts_hosts="controlplane.tailscale.com log.tailscale.io login.tailscale.com"
+    for host in $ts_hosts; do
+        local ip=$(resolve_host "$host")
+        if [[ -n "$ip" ]]; then
+            log "Adding bypass route for ${host} (${ip}) through eth0"
+            ip route add ${ip}/32 via 172.20.0.1 dev eth0 2>/dev/null || \
+                ip route replace ${ip}/32 via 172.20.0.1 dev eth0 2>/dev/null || true
+        else
+            log "WARNING: Could not resolve ${host}"
+        fi
+    done
+
+    # Also add bypass routes for Tailscale DERP servers (common ranges)
+    # DERP servers use TCP 443, and their IPs are in the Tailscale control plane
+    # We route all established connections through their original interface
+
+    # Replace default route: wg0 gets priority, eth0 becomes fallback
+    log "Setting default route through WireGuard..."
+    # Delete the existing eth0 default route and re-add with high metric as fallback
+    local eth0_gw=$(ip route | grep 'default via' | grep eth0 | awk '{print $3}')
+    if [[ -n "$eth0_gw" ]]; then
+        ip route del default via ${eth0_gw} dev eth0 2>/dev/null || true
+        ip route add default via ${eth0_gw} dev eth0 metric 100 2>/dev/null || true
+    fi
+    # Add wg0 default route with low metric (highest priority)
+    ip route add default dev wg0 metric 10 2>/dev/null || ip route replace default dev wg0 metric 10
+
+    log "VPN routing activated - traffic now flows through ProtonVPN"
 }
 
 # Stop WireGuard
@@ -348,7 +428,7 @@ healthcheck() {
     fi
     
     # Check if Tailscale is connected
-    if ! tailscale status --json 2>/dev/null | grep -q '"Online":true'; then
+    if ! tailscale status --json 2>/dev/null | grep -q '"Online": *true'; then
         echo "FAIL: Tailscale not connected"
         return 1
     fi
@@ -382,18 +462,18 @@ main() {
     setup_wireguard
     setup_networking
     
-    # Start services WITHOUT kill switch first
-    # This allows Tailscale to connect to control plane
-    log "Starting services without kill switch to allow initial connectivity..."
+    # Start services WITHOUT kill switch and WITHOUT changing default route
+    # This allows Tailscale to reach its control plane via direct internet
+    log "Starting services (default route stays on eth0 until Tailscale connects)..."
     start_wireguard
     start_tailscale
-    
+
     # Wait for Tailscale to be ready (give it time to authenticate)
     log "Waiting for Tailscale to establish connection..."
     local attempts=0
     local max_attempts=30
     while [[ $attempts -lt $max_attempts ]]; do
-        if tailscale status --json 2>/dev/null | grep -q '"Online":true'; then
+        if tailscale status --json 2>/dev/null | grep -q '"Online": *true'; then
             log "Tailscale is connected!"
             break
         fi
@@ -401,16 +481,20 @@ main() {
         log "Waiting for Tailscale connection... ($attempts/$max_attempts)"
         sleep 2
     done
-    
-    # Now apply kill switch after services are established
-    if [[ "$KILL_SWITCH" == "true" ]]; then
-        if [[ $attempts -lt $max_attempts ]]; then
+
+    # Now activate VPN routing and kill switch after Tailscale is connected
+    if [[ $attempts -lt $max_attempts ]]; then
+        # Tailscale is connected - safe to route traffic through ProtonVPN
+        activate_vpn_routing
+
+        if [[ "$KILL_SWITCH" == "true" ]]; then
             log "Services are ready, applying kill switch..."
             apply_kill_switch
-        else
-            log "WARNING: Tailscale failed to connect, kill switch NOT applied to allow debugging"
-            log "Check your .env configuration and network connectivity"
         fi
+    else
+        log "WARNING: Tailscale failed to connect within timeout"
+        log "NOT activating VPN routing or kill switch to allow debugging"
+        log "Check your .env configuration and network connectivity"
     fi
     
     log "All services started successfully!"

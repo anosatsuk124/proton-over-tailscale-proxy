@@ -36,6 +36,7 @@ futures = "0.3"
 # TOML parsing for config
 serde_yaml = "0.9"
 toml = "0.8"
+chrono = { version = "0.4.43", features = ["serde"] }
 
 [profile.release]
 opt-level = 3

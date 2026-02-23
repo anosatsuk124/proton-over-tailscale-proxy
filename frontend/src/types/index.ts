@@ -20,9 +20,9 @@ export interface SystemStatus {
   exitNode: ExitNodeStatus
   exitNodeEnabled: boolean
   exitNodeApproved: boolean
-  connectedClients: ConnectedClient[]
-  tailscaleIP: string | null
-  protonvpnIP: string | null
+  connectedClients: number
+  tailscaleIp: string | null
+  protonvpnIp: string | null
   connectionQuality: 'excellent' | 'good' | 'fair' | 'poor' | 'unknown'
   lastUpdated: string
 }

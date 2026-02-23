@@ -90,7 +90,7 @@ export function StatusPanel({ status, loading, error }: StatusPanelProps) {
         <div className="status-item">
           <span className="status-label">Connected Clients</span>
           <span className="status-value">
-            {status?.connectedClients?.length || 0}
+            {status?.connectedClients ?? 0}
           </span>
         </div>
       </div>
@@ -119,14 +119,14 @@ export function StatusPanel({ status, loading, error }: StatusPanelProps) {
         <div className="status-item">
           <span className="status-label">Tailscale IP</span>
           <span className="status-value">
-            {status?.tailscaleIP || 'Not available'}
+            {status?.tailscaleIp || 'Not available'}
           </span>
         </div>
 
         <div className="status-item">
           <span className="status-label">ProtonVPN IP</span>
           <span className="status-value">
-            {status?.protonvpnIP || 'Not available'}
+            {status?.protonvpnIp || 'Not available'}
           </span>
         </div>
       </div>
@@ -151,22 +151,6 @@ export function StatusPanel({ status, loading, error }: StatusPanelProps) {
         )}
       </div>
 
-      {status?.connectedClients && status.connectedClients.length > 0 && (
-        <div className="status-section">
-          <h3>Connected Clients ({status.connectedClients.length})</h3>
-          <div className="clients-list">
-            {status.connectedClients.map((client) => (
-              <div key={client.id} className="client-item">
-                <span className="client-name">{client.name}</span>
-                <span className="client-ip">{client.ip}</span>
-                <span className="client-time">
-                  Connected: {new Date(client.connectedAt).toLocaleTimeString()}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   )
 }
