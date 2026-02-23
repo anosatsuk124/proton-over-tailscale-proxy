@@ -2,7 +2,7 @@
 # Routes all Tailscale client traffic through ProtonVPN via WireGuard
 # Uses Tailscale userspace networking for container compatibility
 
-FROM oven/bun:1-alpine
+FROM oven/bun:1.3.9
 
 LABEL maintainer="ProtonVPN-over-Tailscale"
 LABEL description="Container that routes Tailscale exit node traffic through ProtonVPN via WireGuard"
@@ -12,27 +12,32 @@ LABEL description="Container that routes Tailscale exit node traffic through Pro
 # iproute2, iptables: Network routing and firewall for exit node
 # curl: Health checks and HTTP requests
 # ca-certificates: SSL/TLS certificates
-RUN apk add --no-cache \
+# gnupg: For adding Tailscale repository key
+RUN apt-get update && apt-get install -y --no-install-recommends \
     wireguard-tools \
     iproute2 \
     iptables \
-    iptables-legacy \
     curl \
+    wget \
     ca-certificates \
-    && rm -rf /var/cache/apk/*
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Tailscale (official binary)
-ARG TAILSCALE_VERSION=1.58.2
-RUN apk add --no-cache --virtual .build-deps \
-    tar \
-    && wget -q -O /tmp/tailscale.tgz \
-    "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_amd64.tgz" \
-    && tar -xzf /tmp/tailscale.tgz -C /tmp \
-    && cp /tmp/tailscale_${TAILSCALE_VERSION}_amd64/tailscale /usr/local/bin/tailscale \
-    && cp /tmp/tailscale_${TAILSCALE_VERSION}_amd64/tailscaled /usr/local/bin/tailscaled \
-    && chmod +x /usr/local/bin/tailscale /usr/local/bin/tailscaled \
-    && rm -rf /tmp/tailscale* \
-    && apk del .build-deps
+# Install Tailscale from official repository
+RUN curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg \
+    && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list \
+    && apt-get update \
+    && apt-get install -y tailscale \
+    && rm -rf /var/lib/apt/lists/*
+
+# Enable auto-updates for Tailscale
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    unattended-upgrades \
+    cron \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo 'APT::Periodic::Update-Package-Lists "1";' > /etc/apt/apt.conf.d/20auto-upgrades \
+    && echo 'APT::Periodic::Unattended-Upgrade "1";' >> /etc/apt/apt.conf.d/20auto-upgrades \
+    && echo 'Unattended-Upgrade::Allowed-Origins { "Tailscale stable archive"; };' >> /etc/apt/apt.conf.d/50unattended-upgrades
 
 # Create necessary directories
 RUN mkdir -p /etc/wireguard /var/run/tailscale /app /var/log /var/lib/tailscale
