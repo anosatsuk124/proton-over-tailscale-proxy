@@ -149,13 +149,8 @@ services:
 
 networks:
   vpn_macvlan:
-    driver: macvlan
-    driver_opts:
-      parent: ${HOST_INTERFACE:?HOST_INTERFACE is required}
-    ipam:
-      config:
-        - subnet: ${MACVLAN_SUBNET:?MACVLAN_SUBNET is required}
-          gateway: ${MACVLAN_GATEWAY:?MACVLAN_GATEWAY is required}
+    name: ${MACVLAN_NETWORK_NAME:-vpn_macvlan}
+    external: true
 
 volumes:
   tailscale-state:
