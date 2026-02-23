@@ -27,56 +27,86 @@ pub async fn execute_action(
 ) -> Result<impl IntoResponse, ApiError> {
     info!("Action request: {}", request.action);
 
-    let message = match request.action.as_str() {
+    match request.action.as_str() {
         "enable_exit_node" => {
-            state.update_exit_node_state(|s| {
-                s.enabled = true;
-                s.advertised = true;
-            }).await;
-
-            // Try to enable via docker if container exists
             match state.docker.enable_exit_node().await {
-                Ok(_) => "Exit node enabled".to_string(),
+                Ok(_) => {
+                    state.update_exit_node_state(|s| {
+                        s.enabled = true;
+                        s.advertised = true;
+                    }).await;
+                    Ok(Json(ApiResponse {
+                        success: true,
+                        data: Some(ActionMessage { message: "Exit node enabled".to_string() }),
+                        error: None,
+                    }))
+                }
                 Err(e) => {
                     error!("Failed to enable exit node: {}", e);
-                    format!("Exit node state updated (container control unavailable: {})", e)
+                    Ok(Json(ApiResponse {
+                        success: false,
+                        data: None::<ActionMessage>,
+                        error: Some(format!("Failed to enable exit node: {}", e)),
+                    }))
                 }
             }
         }
         "disable_exit_node" => {
-            state.update_exit_node_state(|s| {
-                s.enabled = false;
-                s.advertised = false;
-            }).await;
-
             match state.docker.disable_exit_node().await {
-                Ok(_) => "Exit node disabled".to_string(),
+                Ok(_) => {
+                    state.update_exit_node_state(|s| {
+                        s.enabled = false;
+                        s.advertised = false;
+                    }).await;
+                    Ok(Json(ApiResponse {
+                        success: true,
+                        data: Some(ActionMessage { message: "Exit node disabled".to_string() }),
+                        error: None,
+                    }))
+                }
                 Err(e) => {
                     error!("Failed to disable exit node: {}", e);
-                    format!("Exit node state updated (container control unavailable: {})", e)
+                    Ok(Json(ApiResponse {
+                        success: false,
+                        data: None::<ActionMessage>,
+                        error: Some(format!("Failed to disable exit node: {}", e)),
+                    }))
                 }
             }
         }
         "approve_exit_node" => {
-            // Approval is done via Tailscale admin panel, not API
-            "Exit node approval must be done via Tailscale admin panel".to_string()
+            Ok(Json(ApiResponse {
+                success: true,
+                data: Some(ActionMessage { message: "Exit node approval must be done via Tailscale admin panel".to_string() }),
+                error: None,
+            }))
         }
         "restart" => {
             info!("Restart requested");
-            "Restart must be performed via docker compose".to_string()
+            match state.docker.restart_container().await {
+                Ok(_) => {
+                    Ok(Json(ApiResponse {
+                        success: true,
+                        data: Some(ActionMessage { message: "Container restarted".to_string() }),
+                        error: None,
+                    }))
+                }
+                Err(e) => {
+                    error!("Failed to restart container: {}", e);
+                    Ok(Json(ApiResponse {
+                        success: false,
+                        data: None::<ActionMessage>,
+                        error: Some(format!("Failed to restart container: {}", e)),
+                    }))
+                }
+            }
         }
         _ => {
-            return Ok(Json(ApiResponse {
+            Ok(Json(ApiResponse {
                 success: false,
                 data: None::<ActionMessage>,
                 error: Some(format!("Unknown action: {}", request.action)),
-            }));
+            }))
         }
-    };
-
-    Ok(Json(ApiResponse {
-        success: true,
-        data: Some(ActionMessage { message }),
-        error: None,
-    }))
+    }
 }

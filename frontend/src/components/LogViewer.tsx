@@ -1,27 +1,35 @@
-import { useRef, useEffect } from 'react'
+import { useRef, useEffect, useCallback } from 'react'
 import { useLogs } from '../hooks/useLogs'
 
 // Component to display and manage system logs including exit node logs
 export function LogViewer({ maxLines = 100 }: { maxLines?: number }) {
-  const { 
-    logs, 
-    loading, 
-    error, 
-    autoRefresh, 
-    refreshLogs, 
-    clearLogs, 
+  const {
+    logs,
+    loading,
+    error,
+    autoRefresh,
+    refreshLogs,
+    clearLogs,
     exportLogs,
-    toggleAutoRefresh 
+    toggleAutoRefresh
   } = useLogs(maxLines)
-  
-  const containerRef = useRef<HTMLDivElement>(null)
 
-  // Auto-scroll to bottom when new logs arrive
+  const containerRef = useRef<HTMLDivElement>(null)
+  const isNearBottomRef = useRef(true)
+
+  const handleScroll = useCallback(() => {
+    const el = containerRef.current
+    if (!el) return
+    // Consider "near bottom" if within 50px of the bottom
+    isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 50
+  }, [])
+
+  // Auto-scroll to bottom only when new logs arrive and user is near bottom
   useEffect(() => {
-    if (containerRef.current && autoRefresh) {
+    if (containerRef.current && isNearBottomRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight
     }
-  }, [logs, autoRefresh])
+  }, [logs])
 
   // Helper function to get log level CSS class
   const getLevelClass = (level: string): string => {
@@ -92,7 +100,7 @@ export function LogViewer({ maxLines = 100 }: { maxLines?: number }) {
 
       {error && <div className="error" style={{ marginBottom: '0.5rem' }}>Error: {error}</div>}
 
-      <div className="log-container" ref={containerRef}>
+      <div className="log-container" ref={containerRef} onScroll={handleScroll}>
         {logs.length === 0 ? (
           <div className="log-entry">
             <span className="log-timestamp">--:--:--</span>

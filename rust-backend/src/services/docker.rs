@@ -7,10 +7,13 @@ use bollard::exec::{CreateExecOptions, StartExecOptions};
 use bollard::models::ContainerSummary;
 use futures::StreamExt;
 use std::sync::Arc;
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 use crate::error::ApiError;
 use crate::routes::connection::ConnectRequest;
+
+/// Base URL for the internal API server running inside the container
+const CONTAINER_API_BASE: &str = "http://proton-tailscale-exit-node:8081";
 
 /// URL used to detect public IP address from inside the container
 const PUBLIC_IP_CHECK_URL: &str = "https://ifconfig.me/ip";
@@ -317,14 +320,14 @@ impl DockerService {
                     .map(|s| s.to_string());
 
                 // Peer is an object (map), not an array
+                // Count active peers as connected clients
                 let connected_clients = json["Peer"]
                     .as_object()
                     .map(|peers| {
                         peers
                             .values()
                             .filter(|peer| {
-                                // Peer using us as exit node: they have ExitNode set to our key
-                                peer["ExitNode"].as_bool().unwrap_or(false)
+                                peer["Active"].as_bool().unwrap_or(false)
                             })
                             .count() as u32
                     })
@@ -354,120 +357,66 @@ impl DockerService {
         }
     }
 
-    /// Enable exit node advertisement in Tailscale
+    /// Enable exit node advertisement in Tailscale via container internal API
     pub async fn enable_exit_node(&self) -> Result<(), ApiError> {
-        info!("Enabling exit node advertisement");
+        info!("Enabling exit node advertisement via container API");
 
-        // Run tailscale up with advertise-exit-node flag
-        let exec = self
-            .docker
-            .create_exec(
-                CONTAINER_NAME,
-                CreateExecOptions {
-                    cmd: Some(vec!["tailscale", "up", "--advertise-exit-node"]),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    ..Default::default()
-                },
-            )
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| ApiError::Docker(format!("Failed to create HTTP client: {}", e)))?;
+
+        let resp = client
+            .post(format!("{}/exit-node/enable", CONTAINER_API_BASE))
+            .send()
             .await
-            .map_err(|e| ApiError::Docker(format!("Failed to create exec: {}", e)))?;
+            .map_err(|e| ApiError::Docker(format!("Failed to reach container API: {}", e)))?;
 
-        let start_result = self
-            .docker
-            .start_exec(&exec.id, None::<StartExecOptions>)
-            .await
-            .map_err(|e| ApiError::Docker(format!("Failed to start exec: {}", e)))?;
-
-        if let bollard::exec::StartExecResults::Attached { output: mut stream, .. } = start_result {
-            while let Some(chunk) = stream.next().await {
-                match chunk {
-                    Ok(bollard::container::LogOutput::StdOut { message }) => {
-                        let msg = String::from_utf8_lossy(&message);
-                        debug!("tailscale up output: {}", msg);
-                    }
-                    Ok(bollard::container::LogOutput::StdErr { message }) => {
-                        let stderr = String::from_utf8_lossy(&message);
-                        if stderr.contains("error") || stderr.contains("Error") {
-                            return Err(ApiError::Docker(format!(
-                                "Failed to enable exit node: {}",
-                                stderr
-                            )));
-                        }
-                        warn!("tailscale up stderr: {}", stderr);
-                    }
-                    _ => {}
-                }
-            }
+        if !resp.status().is_success() {
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let err_msg = body["error"].as_str().unwrap_or("Unknown error");
+            return Err(ApiError::Docker(format!("Failed to enable exit node: {}", err_msg)));
         }
 
-        // Wait a moment for changes to take effect
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        // Verify exit node is now advertised
-        match timeout(Duration::from_secs(10), self.check_exit_node_advertised()).await {
-            Ok(Ok(true)) => {
-                info!("Exit node successfully enabled");
-                Ok(())
-            }
-            Ok(Ok(false)) => Err(ApiError::Docker(
-                "Exit node was not advertised after enabling".to_string(),
-            )),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(ApiError::Docker(
-                "Timeout waiting for exit node status".to_string(),
-            )),
-        }
+        info!("Exit node successfully enabled");
+        Ok(())
     }
 
-    /// Disable exit node advertisement
+    /// Disable exit node advertisement via container internal API
     pub async fn disable_exit_node(&self) -> Result<(), ApiError> {
-        info!("Disabling exit node advertisement");
+        info!("Disabling exit node advertisement via container API");
 
-        // Run tailscale up without advertise-exit-node flag
-        let exec = self
-            .docker
-            .create_exec(
-                CONTAINER_NAME,
-                CreateExecOptions {
-                    cmd: Some(vec!["tailscale", "up"]),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    ..Default::default()
-                },
-            )
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| ApiError::Docker(format!("Failed to create HTTP client: {}", e)))?;
+
+        let resp = client
+            .post(format!("{}/exit-node/disable", CONTAINER_API_BASE))
+            .send()
             .await
-            .map_err(|e| ApiError::Docker(format!("Failed to create exec: {}", e)))?;
+            .map_err(|e| ApiError::Docker(format!("Failed to reach container API: {}", e)))?;
 
-        let start_result = self
-            .docker
-            .start_exec(&exec.id, None::<StartExecOptions>)
-            .await
-            .map_err(|e| ApiError::Docker(format!("Failed to start exec: {}", e)))?;
-
-        if let bollard::exec::StartExecResults::Attached { output: mut stream, .. } = start_result {
-            while let Some(chunk) = stream.next().await {
-                match chunk {
-                    Ok(bollard::container::LogOutput::StdOut { message }) => {
-                        let msg = String::from_utf8_lossy(&message);
-                        debug!("tailscale up output: {}", msg);
-                    }
-                    Ok(bollard::container::LogOutput::StdErr { message }) => {
-                        let stderr = String::from_utf8_lossy(&message);
-                        if stderr.contains("error") || stderr.contains("Error") {
-                            return Err(ApiError::Docker(format!(
-                                "Failed to disable exit node: {}",
-                                stderr
-                            )));
-                        }
-                        warn!("tailscale up stderr: {}", stderr);
-                    }
-                    _ => {}
-                }
-            }
+        if !resp.status().is_success() {
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let err_msg = body["error"].as_str().unwrap_or("Unknown error");
+            return Err(ApiError::Docker(format!("Failed to disable exit node: {}", err_msg)));
         }
 
         info!("Exit node advertisement disabled");
+        Ok(())
+    }
+
+    /// Restart the VPN container
+    pub async fn restart_container(&self) -> Result<(), ApiError> {
+        info!("Restarting container: {}", CONTAINER_NAME);
+
+        self.docker
+            .restart_container(CONTAINER_NAME, None)
+            .await
+            .map_err(|e| ApiError::Docker(format!("Failed to restart container: {}", e)))?;
+
+        info!("Container restarted: {}", CONTAINER_NAME);
         Ok(())
     }
 

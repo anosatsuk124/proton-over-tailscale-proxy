@@ -30,6 +30,9 @@ config = { version = "0.14", default-features = false, features = ["json", "toml
 # Tower middleware (comes with axum)
 tower-http = { version = "0.5", features = ["trace", "cors", "fs"] }
 
+# HTTP client - 10k+ stars on GitHub
+reqwest = { version = "0.12", features = ["json"] }
+
 # Futures for async streams
 futures = "0.3"
 
