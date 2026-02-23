@@ -496,14 +496,16 @@ async function setupStunBypass(config: Config): Promise<void> {
   await $`ip rule del fwmark 0x100/0x100 table 100`.nothrow().quiet();
   await $`ip rule add fwmark 0x100/0x100 table 100 priority 100`;
 
-  // 3. Mark all UDP packets from tailscaled via its SO_MARK (0x80000).
+  // 3. Mark packets from tailscaled via its SO_MARK (0x80000).
   // tailscaled sets fwmark 0x80000 on its sockets for routing loop prevention.
   // We use --set-xmark to ADD bit 0x100 without clearing 0x80000,
   // so tailscaled's own routing logic is preserved.
-  // This catches both STUN and data port traffic regardless of port numbers.
+  // UDP: STUN and data port traffic (hole punching, DERP)
+  // TCP: control plane traffic (login.tailscale.com, log.tailscale.com, etc.)
   if (config.bypass.stun || config.bypass.dataPort) {
     await $`iptables -t mangle -A OUTPUT -p udp -m mark --mark 0x80000/0x80000 -j MARK --set-xmark 0x100/0x100`;
-    log("Tailscale UDP bypass enabled (matching fwmark 0x80000 -> eth0)");
+    await $`iptables -t mangle -A OUTPUT -p tcp -m mark --mark 0x80000/0x80000 -j MARK --set-xmark 0x100/0x100`;
+    log("Tailscale bypass enabled (matching fwmark 0x80000 -> eth0 for UDP+TCP)");
   }
 
   // NOTE: MASQUERADE for marked packets is handled in setupNat(),
