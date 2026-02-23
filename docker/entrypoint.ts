@@ -369,7 +369,7 @@ net.ipv4.conf.all.send_redirects = 0
   log("Networking configured for IP forwarding");
 }
 
-async function setupNat(): Promise<void> {
+async function setupNat(config: Config): Promise<void> {
   log("Setting up NAT and masquerading for exit node...");
 
   // Only flush POSTROUTING, preserve Docker's internal DNS NAT rules
@@ -383,13 +383,18 @@ async function setupNat(): Promise<void> {
     .nothrow()
     .quiet();
 
+  // MASQUERADE for STUN/data port bypass packets routed via eth0
+  if (config.bypass.stun || config.bypass.dataPort) {
+    await $`iptables -t nat -A POSTROUTING -o eth0 -m mark --mark 0x100 -j MASQUERADE`;
+  }
+
   log("NAT/masquerading configured");
 }
 
 async function applyKillSwitch(config: Config): Promise<void> {
   if (!config.killSwitch) {
     log("Kill switch disabled");
-    await setupNat();
+    await setupNat(config);
     return;
   }
 
@@ -465,7 +470,7 @@ async function applyKillSwitch(config: Config): Promise<void> {
   }
 
   // Re-apply NAT after flushing
-  await setupNat();
+  await setupNat(config);
 
   log("Kill switch applied");
 }
@@ -506,8 +511,8 @@ async function setupStunBypass(config: Config): Promise<void> {
     log(`Tailscale data port bypass enabled (UDP sport ${config.tailscale.port} -> eth0)`);
   }
 
-  // 5. MASQUERADE for marked packets going out eth0
-  await $`iptables -t nat -A POSTROUTING -o eth0 -m mark --mark 0x100 -j MASQUERADE`;
+  // NOTE: MASQUERADE for marked packets is handled in setupNat(),
+  // which is called after kill switch to survive nat table flushes.
 
   log("STUN/data port bypass configured");
 }
