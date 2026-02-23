@@ -664,6 +664,7 @@ async function startTailscale(config: Config): Promise<void> {
   const tsUpArgs = [
     "tailscale",
     "up",
+    "--reset",
     `--authkey=${config.tailscale.authKey}`,
     `--hostname=${config.tailscale.hostname}`,
     "--advertise-exit-node",
@@ -895,7 +896,7 @@ function startApiServer(): void {
 
       if (req.method === "POST" && url.pathname === "/exit-node/enable") {
         log("API: Enabling exit node advertisement");
-        const result = await $`tailscale up --advertise-exit-node`.nothrow().quiet();
+        const result = await $`tailscale up --reset --advertise-exit-node`.nothrow().quiet();
         if (result.exitCode !== 0) {
           const stderr = result.stderr.toString();
           log(`API: Failed to enable exit node: ${stderr}`);
@@ -907,7 +908,7 @@ function startApiServer(): void {
 
       if (req.method === "POST" && url.pathname === "/exit-node/disable") {
         log("API: Disabling exit node advertisement");
-        const result = await $`tailscale up --advertise-exit-node=false`.nothrow().quiet();
+        const result = await $`tailscale up --reset --advertise-exit-node=false`.nothrow().quiet();
         if (result.exitCode !== 0) {
           const stderr = result.stderr.toString();
           log(`API: Failed to disable exit node: ${stderr}`);
