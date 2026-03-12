@@ -56,7 +56,7 @@ services:
       - TAILSCALE_SERVE_FRONTEND=${TAILSCALE_SERVE_FRONTEND:-true}
 
     volumes:
-      - tailscale-state:/var/lib/tailscale
+      - tailscale-state:/var/lib/${TAILSCALE_HOSTNAME}/tailscale
 
     dns:
       - ${MACVLAN_GATEWAY:?MACVLAN_GATEWAY is required}
@@ -78,7 +78,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
-
 
   # Rust Backend API
   # Provides REST API for managing the VPN connection and exit node
@@ -157,4 +156,3 @@ volumes:
     driver: local
   rust-config:
     driver: local
-
