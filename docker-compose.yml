@@ -56,7 +56,7 @@ services:
       - TAILSCALE_SERVE_FRONTEND=${TAILSCALE_SERVE_FRONTEND:-true}
 
     volumes:
-      - tailscale-state:/var/lib/${TAILSCALE_HOSTNAME}/tailscale
+      - ./tailscale-state:/var/lib/tailscale
 
     dns:
       - ${MACVLAN_GATEWAY:?MACVLAN_GATEWAY is required}
@@ -152,7 +152,5 @@ networks:
     external: true
 
 volumes:
-  tailscale-state:
-    driver: local
   rust-config:
     driver: local
