@@ -4,6 +4,8 @@ import { Subprocess } from "bun";
 // ProtonVPN + Tailscale Exit Node Entrypoint
 // Routes all Tailscale client traffic through ProtonVPN via WireGuard
 
+const STARTUP_COMPLETE_MARKER = "/tmp/startup-complete";
+
 // --- Config ---
 
 interface Config {
@@ -663,11 +665,16 @@ async function startTailscale(config: Config): Promise<void> {
     stderr: "inherit",
   });
 
-  // Wait until LocalAPI is ready
+  // Wait until LocalAPI is ready (accepts commands, regardless of auth state)
   log("Waiting for tailscaled LocalAPI to be ready...");
   while (true) {
-    const ready = await $`tailscale --socket=${sock} status`.nothrow().quiet();
+    const ready = await $`tailscale --socket=${sock} status --json`.nothrow().quiet();
     if (ready.exitCode === 0) break;
+    // NeedsLogin state returns non-zero exit code but valid JSON
+    try {
+      const json = JSON.parse(ready.text());
+      if (json.BackendState) break; // Daemon is ready, just not authenticated
+    } catch {}
     await Bun.sleep(200);
   }
   log("tailscaled is ready");
@@ -768,6 +775,20 @@ async function setupTailscaleServe(config: Config): Promise<void> {
 // --- Health Check ---
 
 async function healthcheck(config: Config): Promise<boolean> {
+  // During startup, only verify the main entrypoint process is alive
+  const markerExists = await Bun.file(STARTUP_COMPLETE_MARKER).exists();
+  if (!markerExists) {
+    const apiCheck = await $`curl -s --max-time 2 -o /dev/null -w "%{http_code}" http://localhost:8081/status`
+      .nothrow()
+      .quiet();
+    if (apiCheck.exitCode === 0 && apiCheck.text().trim() !== "000") {
+      console.log("OK: Startup in progress, entrypoint process alive");
+      return true;
+    }
+    console.log("FAIL: Startup in progress but entrypoint not responding");
+    return false;
+  }
+
   // Check if WireGuard interface exists and is up
   const wgCheck = await $`ip link show wg0`.nothrow().quiet();
   if (wgCheck.exitCode !== 0) {
@@ -990,6 +1011,9 @@ async function main(): Promise<void> {
     process.exit(ok ? 0 : 1);
   }
 
+  // Remove stale startup marker from previous run
+  await $`rm -f ${STARTUP_COMPLETE_MARKER}`.nothrow().quiet();
+
   // Start cron for auto-updates
   await startCronService();
 
@@ -1055,6 +1079,9 @@ async function main(): Promise<void> {
     log("NOT activating VPN routing or kill switch to allow debugging");
     log("Check your .env configuration and network connectivity");
   }
+
+  // Signal startup complete for healthcheck
+  await Bun.write(STARTUP_COMPLETE_MARKER, new Date().toISOString());
 
   log("All services started successfully!");
   log(

@@ -53,7 +53,7 @@ EXPOSE 41641/udp
 # Run with: --cap-add=NET_ADMIN --cap-add=SYS_MODULE --device=/dev/net/tun
 
 # Health check - verify VPN and Tailscale are operational
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
     CMD bun run /app/entrypoint.ts healthcheck || exit 1
 
 ENTRYPOINT ["bun", "run", "/app/entrypoint.ts"]
