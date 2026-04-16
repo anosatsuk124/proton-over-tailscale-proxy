@@ -632,13 +632,19 @@ async function refreshBypassRoutes(): Promise<void> {
 // --- Tailscale ---
 
 async function startTailscale(config: Config): Promise<void> {
-  log("Starting Tailscale with userspace networking...");
+  log("Starting Tailscale...");
+
+  const stateDir = "/var/lib/tailscale";
+  const sock = "/var/run/tailscale/tailscaled.sock";
+
+  // Ensure directories exist
+  await $`mkdir -p ${stateDir} /var/run/tailscale`.nothrow().quiet();
 
   // Build tailscaled arguments
   const tailscaledArgs = [
     "tailscaled",
-    "--state=/var/lib/tailscale/tailscaled.state",
-    "--socket=/var/run/tailscale/tailscaled.sock",
+    `--statedir=${stateDir}`,
+    `--socket=${sock}`,
   ];
 
   if (config.tailscale.userspaceNetworking) {
@@ -657,30 +663,51 @@ async function startTailscale(config: Config): Promise<void> {
     stderr: "inherit",
   });
 
-  // Wait for daemon to start
-  await Bun.sleep(2_000);
+  // Wait until LocalAPI is ready
+  log("Waiting for tailscaled LocalAPI to be ready...");
+  while (true) {
+    const ready = await $`tailscale --socket=${sock} status`.nothrow().quiet();
+    if (ready.exitCode === 0) break;
+    await Bun.sleep(200);
+  }
+  log("tailscaled is ready");
 
-  // Build tailscale up arguments
-  const tsUpArgs = [
-    "tailscale",
-    "up",
-    "--reset",
-    `--authkey=${config.tailscale.authKey}`,
-    `--hostname=${config.tailscale.hostname}`,
-    "--advertise-exit-node",
-    `--accept-dns=${config.tailscale.acceptDns}`,
-  ];
-
-  if (config.tailscale.ssh) {
-    tsUpArgs.push("--ssh");
+  // Authenticate only if not already running (idempotent)
+  const statusCheck = await $`tailscale --socket=${sock} status --json`.nothrow().quiet();
+  let alreadyRunning = false;
+  if (statusCheck.exitCode === 0) {
+    try {
+      const json = JSON.parse(statusCheck.text());
+      if (json.BackendState === "Running") {
+        alreadyRunning = true;
+      }
+    } catch {}
   }
 
-  if (config.tailscale.advertiseRoutes) {
-    tsUpArgs.push(`--advertise-routes=${config.tailscale.advertiseRoutes}`);
-  }
+  if (alreadyRunning) {
+    log("Tailscale is already running, skipping authentication");
+  } else {
+    // Build tailscale up arguments
+    const tsUpArgs = [
+      "tailscale",
+      `--socket=${sock}`,
+      "up",
+      `--auth-key=${config.tailscale.authKey}`,
+      `--hostname=${config.tailscale.hostname}`,
+      "--advertise-exit-node",
+      `--accept-dns=${config.tailscale.acceptDns}`,
+    ];
 
-  // Bring up Tailscale
-  await $`${tsUpArgs}`;
+    if (config.tailscale.ssh) {
+      tsUpArgs.push("--ssh");
+    }
+
+    if (config.tailscale.advertiseRoutes) {
+      tsUpArgs.push(`--advertise-routes=${config.tailscale.advertiseRoutes}`);
+    }
+
+    await $`${tsUpArgs}`;
+  }
 
   log("Tailscale started successfully with exit node enabled");
 
